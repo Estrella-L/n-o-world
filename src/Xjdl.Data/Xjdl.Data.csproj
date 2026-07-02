@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- 单向依赖：Xjdl.Data → Xjdl.Core（Core 永不反向引用 Data，见 design §Architecture / Req 20.3、20.4） -->
+  <ItemGroup>
+    <ProjectReference Include="..\Xjdl.Core\Xjdl.Core.csproj" />
+  </ItemGroup>
+
+</Project>

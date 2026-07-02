@@ -1,24 +1,24 @@
-# 依赖
-node_modules/
-.pnp/
-.pnp.js
+# .NET 构建产物
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+project.lock.json
+artifacts/
 
-# 构建产物
-dist/
-build/
-out/
-*.tsbuildinfo
-
-# 测试与覆盖率
+# .NET 测试与覆盖率
+[Tt]est[Rr]esult*/
 coverage/
-.vitest/
+*.coverage
+*.trx
 
-# 日志
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+# Godot 4 缓存与产物
+.godot/
+/game/.godot/
+export_presets.cfg
+*.translation
 
 # 环境变量
 .env
@@ -26,6 +26,7 @@ pnpm-debug.log*
 !.env.example
 
 # 编辑器/IDE（个人配置不入库）
+.vs/
 .vscode/
 .idea/
 *.swp
@@ -38,3 +39,6 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 构建/校验过程日志（临时产物，不入库）
+*.log

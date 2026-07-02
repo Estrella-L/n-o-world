@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 允许测试项目观察 internal 的 TurnPipeline 阶段骨架（任务 15.2 阶段序列断言）。 -->
+    <InternalsVisibleTo Include="Xjdl.Core.Tests" />
+  </ItemGroup>
+
+</Project>
