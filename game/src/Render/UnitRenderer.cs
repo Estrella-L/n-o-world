@@ -35,6 +35,11 @@ public partial class UnitRenderer : Node2D
     private IReadOnlyList<UnitView> _friendly = System.Array.Empty<UnitView>();
     private IReadOnlyList<EnemyView> _enemies = System.Array.Empty<EnemyView>();
 
+    // 动画位置覆盖（UnitId.Value → 像素中心）：阶段动画期间由 PhaseAnimator 逐帧写入，
+    // 使被移动的棋子沿轨迹平滑移动，而非等结算后瞬移到落点（Req 8.4/8.5）。
+    // 有覆盖的单位在 _Draw 中脱离同格分组、按覆盖位单独绘制于最上层。
+    private readonly Dictionary<int, Vector2> _animOverrides = new();
+
     /// <summary>
     /// 用新快照的己方与敌方视图整体替换绘制集合并触发重绘（Req 4.1/4.5）。
     /// 敌方列表已由 <c>PresentationMapper</c> 按可见度过滤：仅含 Identified / Spotted，
@@ -47,34 +52,78 @@ public partial class UnitRenderer : Node2D
         QueueRedraw();
     }
 
+    /// <summary>
+    /// 设置某单位的动画位置覆盖并重绘（Req 8.4/8.5）：阶段动画中由 <c>PhaseAnimator</c> 沿移动轨迹
+    /// 逐帧调用，使棋子平滑移动。收尾/跳过时应调用 <see cref="ClearAnimationOverrides"/> 清除，
+    /// 之后按结算后快照重绘。
+    /// </summary>
+    public void SetAnimationOverride(UnitId unit, Vector2 center)
+    {
+        _animOverrides[unit.Value] = center;
+        QueueRedraw();
+    }
+
+    /// <summary>清除全部动画位置覆盖并重绘，使棋子回到其快照落点（Req 8.4/8.6/8.7）。</summary>
+    public void ClearAnimationOverrides()
+    {
+        if (_animOverrides.Count == 0)
+        {
+            return;
+        }
+
+        _animOverrides.Clear();
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         // 按所在格聚合，使同格多个棋子以叠放偏移 + 数量角标呈现（Req 4.4）。
         var groups = new Dictionary<HexCoord, List<Token>>();
 
+        // 有动画覆盖的单位：脱离分组、按覆盖位单独绘制于最上层（阶段动画中的移动棋子）。
+        var moving = new List<(Token Token, Vector2 Center)>();
+
         foreach (UnitView u in _friendly)
         {
-            AddToken(groups, new Token(
+            var token = new Token(
                 Position: u.Position,
                 Center: ToGodot(u.Center),
                 FillColor: SideColor(u.Side),
                 ClassLabel: ClassLabel(u.Class),
                 Stats: FormatStats(u.Attack, u.Defense, u.ResilienceLeft),
                 StackCount: u.StackCount,
-                Unknown: false));
+                Unknown: false);
+
+            if (_animOverrides.TryGetValue(u.Id.Value, out Vector2 overrideCenter))
+            {
+                moving.Add((token, overrideCenter));
+            }
+            else
+            {
+                AddToken(groups, token);
+            }
         }
 
         foreach (EnemyView e in _enemies)
         {
             bool identified = e.Visibility == Visibility.Identified;
-            AddToken(groups, new Token(
+            var token = new Token(
                 Position: e.Position,
                 Center: ToGodot(e.Center),
                 FillColor: identified ? SideColor(Side.Red) : SpottedColor,
                 ClassLabel: identified && e.Class.HasValue ? ClassLabel(e.Class.Value) : "?",
                 Stats: identified ? FormatStats(e.Attack, e.Defense, e.ResilienceLeft) : null,
                 StackCount: identified ? e.StackCount : null,
-                Unknown: !identified));
+                Unknown: !identified);
+
+            if (_animOverrides.TryGetValue(e.Id.Value, out Vector2 overrideCenter))
+            {
+                moving.Add((token, overrideCenter));
+            }
+            else
+            {
+                AddToken(groups, token);
+            }
         }
 
         foreach (List<Token> stack in groups.Values)
@@ -84,6 +133,12 @@ public partial class UnitRenderer : Node2D
                 Vector2 center = stack[i].Center + (StackOffset * i);
                 DrawToken(stack[i], center);
             }
+        }
+
+        // 移动中的棋子绘制在最上层，直接落在动画覆盖位（不参与同格叠放偏移）。
+        foreach ((Token token, Vector2 center) in moving)
+        {
+            DrawToken(token, center);
         }
     }
 

@@ -78,6 +78,10 @@ public partial class PlanningController : Node2D
     private UnitId _dragUnit;
     private bool _dragIsAttackPrep;
 
+    // 本次拖拽已记忆的途径点（不含起点，按经过顺序）。按住 Shift 拖动时逐格记忆，
+    // 使路径能绕行/画弧而非只取最近路（经 PathPlanner.ExtendThrough 依次穿过）。
+    private readonly List<HexCoord> _waypoints = new();
+
     /// <summary>
     /// 是否处于计划阶段并接受下令（Req 6.12）。仅当为 <c>true</c> 时处理鼠标下令输入；
     /// 置为 <c>false</c> 时取消进行中的拖拽预览。由 <c>TurnController</c>/<c>PhaseControlBar</c>
@@ -252,12 +256,14 @@ public partial class PlanningController : Node2D
         _draft = _planner.Begin(unit);
         _dragUnit = unit;
         _dragIsAttackPrep = false;
+        _waypoints.Clear();
         _dragState = DragState.Dragging;
 
         RenderActivePreview();
     }
 
-    // Dragging → Dragging：沿光标逐格延伸路径并实时预览消耗；终点悬停敌格时以进攻准备样式提示（Req 6.3/6.8）。
+    // Dragging → Dragging：沿光标经途径点逐格延伸路径并实时预览消耗；终点悬停敌格时以进攻准备样式提示（Req 6.3/6.8）。
+    // 按住 Shift 拖动时把光标所经的新格记忆为途径点，从而画出绕行/弧形路径而非只取最近路。
     private void ExtendDrag(Vector2 world)
     {
         if (_planner is null)
@@ -266,9 +272,39 @@ public partial class PlanningController : Node2D
         }
 
         var cursor = ToVector2D(world);
-        _draft = _planner.Extend(_draft, cursor);
-        _dragIsAttackPrep = EnemyAt(_layout.CoordAt(cursor));
+        var cursorHex = _layout.CoordAt(cursor);
+
+        if (Godot.Input.IsKeyPressed(Key.Shift))
+        {
+            TryRememberWaypoint(cursorHex, cursor);
+        }
+
+        _draft = _planner.ExtendThrough(_draft, _waypoints, cursor);
+        _dragIsAttackPrep = EnemyAt(cursorHex);
         RenderActivePreview();
+    }
+
+    // Shift 拖动时记忆途径点：仅当该格不同于上一锚点（途径点或起点），且经其仍能在预算内合法抵达时才记入。
+    // 由此快速划过多格也会由 ExtendThrough 贪心补齐中间格，形成连续的自定义路径。
+    private void TryRememberWaypoint(HexCoord hex, Vector2D cursor)
+    {
+        if (_planner is null || _draft.Path.Count == 0)
+        {
+            return;
+        }
+
+        var anchor = _waypoints.Count > 0 ? _waypoints[^1] : _draft.Path[0];
+        if (hex == anchor)
+        {
+            return;
+        }
+
+        var candidate = new List<HexCoord>(_waypoints) { hex };
+        var probe = _planner.ExtendThrough(_draft, candidate, cursor);
+        if (!probe.BlockedAhead)
+        {
+            _waypoints.Add(hex);
+        }
     }
 
     // 松开左键：按终点组装命令并转移状态（Req 6.5/6.8/6.9）。
@@ -321,6 +357,7 @@ public partial class PlanningController : Node2D
         }
 
         _planner = null;
+        _waypoints.Clear();
     }
 
     // ── 箭头绘制 ──────────────────────────────────────────────────────

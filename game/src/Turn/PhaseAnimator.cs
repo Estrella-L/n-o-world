@@ -134,8 +134,11 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
         try
         {
-            // 阶段 2（机动/移动）：依提交路径逐格重放，以回合末实际落点收尾（Req 8.4）。
-            await ReplayMovementAsync(after, orders);
+            // 先把棋子渲染到回合前位置，作为移动动画的起点（避免仍停在上一次渲染态）。
+            RenderUnits(before);
+
+            // 阶段 2（机动/移动）：依提交路径沿轨迹平滑移动棋子，以回合末实际落点收尾（Req 8.4）。
+            await ReplayMovementAsync(before, after, orders);
 
             // 阶段 2–8：按回合日志顺序逐条呈现高亮 + 中文提示（文案复用 PresentationMapper）。
             await ReplayLogAsync(after, log);
@@ -159,7 +162,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// Core 不回吐逐格中间快照，故轨迹依提交路径近似重放；若计划路径与实际落点不一致（被截断/停下），
     /// 以实际落点截断/收尾。
     /// </summary>
-    private async Task ReplayMovementAsync(GameState after, IReadOnlyList<UnitOrder> orders)
+    private async Task ReplayMovementAsync(
+        GameState before, GameState after, IReadOnlyList<UnitOrder> orders)
     {
         foreach (var order in orders)
         {
@@ -173,21 +177,89 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
                 continue;
             }
 
+            var startPos = FindUnitPosition(before, order.Unit);
             var landing = FindUnitPosition(after, order.Unit);
-            var trajectory = BuildTrajectory(path, landing);
+            var cells = BuildTrajectory(path, landing);
 
-            foreach (var cell in trajectory)
+            // 组装像素轨迹：起点中心 + 逐格中心，逐段补间移动棋子。
+            var centers = new List<Vector2>(cells.Count + 1);
+            if (startPos is { } sp)
+            {
+                centers.Add(ToGodot(_layout.CenterOf(sp)));
+            }
+
+            foreach (var cell in cells)
+            {
+                centers.Add(ToGodot(_layout.CenterOf(cell)));
+            }
+
+            if (centers.Count == 0)
+            {
+                continue;
+            }
+
+            // 起始把棋子钉在起点覆盖位，使其脱离同格分组、独立沿轨迹移动。
+            _unitRenderer?.SetAnimationOverride(order.Unit, centers[0]);
+
+            for (var i = 1; i < centers.Count; i++)
             {
                 if (_skipped)
                 {
-                    return;
+                    break;
                 }
 
-                SetPrompt($"单位 {FormatUnit(order.Unit)} 移动 → {FormatCell(cell)}");
-                HighlightCell(cell);
-                await StepDelayAsync();
+                SetPrompt($"单位 {FormatUnit(order.Unit)} 移动 → {FormatCell(cells[i - 1])}");
+                HighlightCell(cells[i - 1]);
+                await TweenTokenAsync(order.Unit, centers[i - 1], centers[i]);
             }
+
+            // 收尾把该单位钉在落点（跳过时也就位）；随后 PresentFinalState 清覆盖并按结算态重绘。
+            _unitRenderer?.SetAnimationOverride(order.Unit, centers[^1]);
         }
+    }
+
+    /// <summary>
+    /// 沿单段轨迹平滑移动棋子（Req 8.4/8.5）：经 Godot <c>Tween</c> 在 <see cref="_stepSeconds"/> 内
+    /// 把该单位的动画覆盖位从 <paramref name="from"/> 补间到 <paramref name="to"/>。已跳过、无渲染器、
+    /// 不在场景树或停顿 &lt;=0 时直接就位到终点，保证 <see cref="Skip"/> 后迅速短路（Req 8.7）。
+    /// </summary>
+    private async Task TweenTokenAsync(UnitId unit, Vector2 from, Vector2 to)
+    {
+        if (_unitRenderer is null)
+        {
+            await StepDelayAsync();
+            return;
+        }
+
+        SceneTree? tree = GetTree();
+        if (_skipped || _stepSeconds <= 0.0 || tree is null)
+        {
+            _unitRenderer.SetAnimationOverride(unit, to);
+            return;
+        }
+
+        UnitRenderer renderer = _unitRenderer;
+        Tween tween = CreateTween();
+        tween.TweenMethod(
+            Callable.From((Vector2 center) => renderer.SetAnimationOverride(unit, center)),
+            from,
+            to,
+            _stepSeconds);
+        await ToSignal(tween, Tween.SignalName.Finished);
+    }
+
+    /// <summary>按可见度把某状态的己方/敌方单位渲染到棋子层与迷雾层（可选渲染器缺席时安全跳过）。</summary>
+    private void RenderUnits(GameState state)
+    {
+        if (_unitRenderer is null && _fogView is null)
+        {
+            return;
+        }
+
+        var friendly = _mapper.FriendlyUnits(state, _viewer);
+        var enemies = _mapper.EnemyUnits(state, _viewer);
+        _unitRenderer?.Render(friendly, enemies);
+        _fogView?.ApplyFog(enemies);
     }
 
     /// <summary>
@@ -293,6 +365,9 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// </summary>
     private void PresentFinalState(GameState after)
     {
+        // 清除移动动画的位置覆盖，使棋子按结算后落点绘制（Req 8.4/8.6/8.7）。
+        _unitRenderer?.ClearAnimationOverrides();
+
         _mapRenderer?.Render(_mapper.MapCells(after));
 
         if (_unitRenderer is not null || _fogView is not null)
@@ -360,6 +435,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
         await ToSignal(tree.CreateTimer(_stepSeconds), SceneTreeTimer.SignalName.Timeout);
     }
+
+    private static Vector2 ToGodot(Vector2D v) => new((float)v.X, (float)v.Y);
 
     private static string FormatUnit(UnitId id) =>
         id.Value.ToString(CultureInfo.InvariantCulture);

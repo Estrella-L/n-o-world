@@ -86,17 +86,115 @@ public sealed class PathPlanner
 
         var path = new List<HexCoord> { start };
         var usedCost = 0;
-        var current = start;
 
-        // 逐格朝目标推进：六角网格上，非目标格必有相邻格使距离严格减小，
-        // 故循环至多经过 start.DistanceTo(target) 步即终止。
+        RouteSegment(unit, target, path, ref usedCost, draft.MovementBudget);
+
+        // BlockedAhead 当且仅当未能一直延伸到目标格（含"抵达目标即止地形"仍算抵达）。
+        return draft with
+        {
+            Path = path,
+            UsedCost = usedCost,
+            BlockedAhead = path[^1] != target,
+        };
+    }
+
+    /// <summary>
+    /// 经过一串<b>途径点</b>再到光标格的多段路径规划（Req 6.3/6.4/6.13，支持绕行/画弧）：
+    /// 依次把起点 → <paramref name="waypoints"/> 中各点 → 光标吸附格拼成一条连续合法路径，
+    /// 每段仍用 <see cref="RouteSegment"/> 逐格贪心推进并<b>跨段累计</b>移动消耗与预算。
+    /// 任一段因越界/禁入/超限/进入即止无法抵达其目标时，路径止步于最后一个合法格并置
+    /// <see cref="PathDraft.BlockedAhead"/>，不再续接后续途径点（Req 6.4）。
+    /// <para>
+    /// 供 <c>PlanningController</c> 在拖拽时按住修饰键「记忆途径点」以画出任意折线/弧线路径，
+    /// 而非只能取最近路。途径点与光标格若与当前段起点重合则该段直接视为已达（零位移），
+    /// 故重复/共线途径点无害。
+    /// </para>
+    /// </summary>
+    /// <param name="draft">当前草案（提供起点、被规划单位与机动点预算）。</param>
+    /// <param name="waypoints">按顺序经过的途径格（不含起点；可为空，此时等价于 <see cref="Extend"/>）。</param>
+    /// <param name="cursorPixel">光标像素坐标（最终目标格）。</param>
+    /// <returns>依次穿过各途径点后到光标格的新草案（值语义快照）。</returns>
+    public PathDraft ExtendThrough(
+        PathDraft draft, IReadOnlyList<HexCoord> waypoints, Vector2D cursorPixel)
+    {
+        ArgumentNullException.ThrowIfNull(waypoints);
+
+        if (draft.Path.Count == 0)
+        {
+            return draft;
+        }
+
+        var unit = FindUnit(draft.Unit);
+        var start = draft.Path[0];
+        var target = _layout.CoordAt(cursorPixel);
+
+        var path = new List<HexCoord> { start };
+        var usedCost = 0;
+        var blocked = false;
+
+        foreach (var waypoint in waypoints)
+        {
+            var result = RouteSegment(unit, waypoint, path, ref usedCost, draft.MovementBudget);
+
+            // 未能抵达该途径点（越界/禁入/超限）→ 截断于最后一个合法格。
+            if (path[^1] != waypoint)
+            {
+                blocked = true;
+                break;
+            }
+
+            // 恰好停在"进入即止"地形上的途径点：抵达但本回合无法继续，路径就此止步。
+            if (result == SegmentResult.Stopped)
+            {
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked)
+        {
+            RouteSegment(unit, target, path, ref usedCost, draft.MovementBudget);
+            blocked = path[^1] != target;
+        }
+
+        return draft with
+        {
+            Path = path,
+            UsedCost = usedCost,
+            BlockedAhead = blocked,
+        };
+    }
+
+    /// <summary>一段路由的结果。<see cref="Reached"/> 表示抵达段目标；其余表示被截断（BlockedAhead）。</summary>
+    private enum SegmentResult
+    {
+        /// <summary>抵达该段目标格。</summary>
+        Reached,
+
+        /// <summary>所有使距离减小的相邻格都不合法（越界/禁入/超限），止步于最后一个合法格。</summary>
+        Blocked,
+
+        /// <summary>踏入「进入即止」地形，本格合法但无法继续。</summary>
+        Stopped,
+    }
+
+    /// <summary>
+    /// 从 <paramref name="path"/> 末尾逐格朝 <paramref name="target"/> 贪心推进一段：在使六角距离
+    /// 严格减小的相邻格中，按固定方向序（<see cref="HexCoord.Directions"/>）挑第一个「在图内 + 可进入
+    /// + 预算充足」的格纳入路径并累计消耗，直到抵达 <paramref name="target"/>、被截断或踏入进入即止地形。
+    /// 就地修改 <paramref name="path"/> 与 <paramref name="usedCost"/>，保证确定性。
+    /// </summary>
+    private SegmentResult RouteSegment(
+        UnitState unit, HexCoord target, List<HexCoord> path, ref int usedCost, int budget)
+    {
+        var current = path[^1];
+
+        // 六角网格上，非目标格必有相邻格使距离严格减小，故循环至多经过 current.DistanceTo(target) 步即终止。
         while (current != target)
         {
             var currentDistance = current.DistanceTo(target);
             var stepped = false;
 
-            // 在使距离严格减小的相邻格中，按固定方向序（HexCoord.Directions）挑第一个
-            // 「在图内 + 可进入 + 预算充足」的格，保证确定性且能沿合法方向绕行一步。
             foreach (var direction in HexCoord.Directions)
             {
                 var next = current + direction;
@@ -119,7 +217,7 @@ public sealed class PathPlanner
                 }
 
                 var cost = TerrainSystem.MoveCost(_terrain, cell.Terrain, unit.Class);
-                if (usedCost + cost > draft.MovementBudget)
+                if (usedCost + cost > budget)
                 {
                     // 进入会使累计消耗超过机动点（Req 6.3/6.4）。
                     continue;
@@ -134,7 +232,7 @@ public sealed class PathPlanner
                 // 进入即止地形：本格合法但无法继续（Req 6.4）。
                 if (IsEnterAndStop(cell.Terrain))
                 {
-                    return Finish(draft, path, usedCost, current, target);
+                    return SegmentResult.Stopped;
                 }
 
                 break;
@@ -143,11 +241,11 @@ public sealed class PathPlanner
             if (!stepped)
             {
                 // 所有使距离减小的相邻格都不合法：止步于最后一个合法格。
-                break;
+                return SegmentResult.Blocked;
             }
         }
 
-        return Finish(draft, path, usedCost, current, target);
+        return SegmentResult.Reached;
     }
 
     /// <summary>
@@ -168,19 +266,6 @@ public sealed class PathPlanner
             BlockedAhead = false,
         };
     }
-
-    /// <summary>
-    /// 收尾：<see cref="PathDraft.BlockedAhead"/> 为真当且仅当路径未能一直延伸到吸附目标格
-    /// （即因越界/禁入/超限/进入即止被截断于最后一个合法格）。
-    /// </summary>
-    private static PathDraft Finish(
-        PathDraft draft, List<HexCoord> path, int usedCost, HexCoord current, HexCoord target)
-        => draft with
-        {
-            Path = path,
-            UsedCost = usedCost,
-            BlockedAhead = current != target,
-        };
 
     private bool IsEnterAndStop(TerrainType terrain)
         => _terrain.Terrains.TryGetValue(terrain, out var spec) && spec.EnterAndStop;
