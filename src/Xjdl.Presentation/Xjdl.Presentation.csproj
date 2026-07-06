@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    纯 C# 表现逻辑层：不引用 Godot 包，仅依赖 Xjdl.Core / Xjdl.Data，
+    从而可脱离引擎编译并被 tests/Xjdl.Presentation.Tests 属性测试覆盖
+    （design §Testing Strategy / Req 1.3、17.1）。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Xjdl.Core\Xjdl.Core.csproj" />
+    <ProjectReference Include="..\Xjdl.Data\Xjdl.Data.csproj" />
+  </ItemGroup>
+
+</Project>

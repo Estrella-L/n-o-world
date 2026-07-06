@@ -1,0 +1,58 @@
+[gd_scene load_steps=2 format=3 uid="uid://c0matchsetup152x"]
+
+[ext_resource type="Script" path="res://src/Menu/MatchSetupController.cs" id="1_setup"]
+
+[node name="MatchSetup" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_setup")
+
+[node name="SetupLayout" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -160.0
+offset_top = -140.0
+offset_right = 160.0
+offset_bottom = 140.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="SetupLayout"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "对局设置"
+horizontal_alignment = 1
+
+[node name="ScaleSelector" type="OptionButton" parent="SetupLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="SeedInput" type="LineEdit" parent="SetupLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "随机种子（留空则用默认）"
+
+[node name="OpponentMode" type="OptionButton" parent="SetupLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="BtnStart" type="Button" parent="SetupLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "开始对局"
+
+[node name="ErrorLabel" type="Label" parent="SetupLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+visible = false
+autowrap_mode = 3
+theme_override_colors/font_color = Color(0.9, 0.3, 0.3, 1)

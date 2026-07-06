@@ -1,0 +1,369 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Threading.Tasks;
+using Godot;
+using Xjdl.Core.Hex;
+using Xjdl.Core.State;
+using Xjdl.Game.Presentation;
+using Xjdl.Game.Presentation.ViewModels;
+using Xjdl.Game.Render;
+
+// 与 TurnController/UnitRenderer 同款约定：Godot 亦定义了 Godot.Side（Left/Top/Right/Bottom），
+// 本文件“阵营”一律指 Xjdl.Core.State.Side，显式别名消歧。
+using Side = Xjdl.Core.State.Side;
+
+namespace Xjdl.Game.Turn;
+
+/// <summary>
+/// 阶段动画器（节点层，Req 8.4/8.5/8.7）。实现 <see cref="IPhaseAnimator"/>，可直接接线到
+/// <see cref="TurnController"/>。
+/// <para>
+/// <b>三源重建</b>（Req 8.4）：本动画器不依赖 Core 的逐阶段中间快照——Core 以单次
+/// <c>NextState</c> 原子结算整个 WEGO 回合，仅回吐回合末 <see cref="GameState"/> 与其
+/// <see cref="GameState.TurnLog"/>。故阶段 0–9 由「回合前 <c>before</c> + 回合末 <c>after</c> +
+/// 回合日志 <c>log</c>」<b>重建/近似</b>呈现。
+/// </para>
+/// <para>
+/// <b>呈现形式</b>（Req 8.5）：默认「分步高亮 + 中文文字提示 + 可跳过」，不做精细补间。移动阶段依
+/// 玩家提交的 <see cref="UnitOrder.Path"/> 逐格重放，并<b>以回合末实际落点收尾</b>（被 Core 在结算时
+/// 截断/停下的落点以 <c>after</c> 中该单位的 <see cref="UnitState.Position"/> 为准）；随后按回合日志
+/// 顺序逐条呈现接触/选表/快照/战斗结果/撤退/推进/临机机动的高亮与中文提示。
+/// </para>
+/// <para>
+/// <b>文案复用</b>：中文文案<b>不</b>在本类重复实现 <c>Kind → 中文</c> 的 switch，而是复用
+/// <see cref="PresentationMapper.LogLines"/>（返回按 <c>TurnLog</c> 顺序、含 <c>Turn/Kind/Text/Locate</c>
+/// 的 <see cref="LogLineView"/>），与 <c>TurnLogView</c> 保持一致。由于 <see cref="PresentationMapper.LogLines"/>
+/// 由 <c>after.TurnLog</c> 生成，与传入的 <c>log</c> 同源同序，按序对齐即可。
+/// </para>
+/// <para>
+/// <b>可跳过</b>（Req 8.7）：<see cref="Skip"/> 置位跳过标志，<see cref="PlayAsync"/> 在每个步骤前检查该
+/// 标志并短路，最终收尾直达结算后最终态。
+/// </para>
+/// <para>
+/// <b>接线（供任务 15.2 组装 <c>Match.tscn</c> 时完成）</b>：经 <see cref="Initialize"/> 注入
+/// <see cref="PresentationMapper"/> 与 <see cref="HexLayout"/>（用于文案与格顶点换算），以及可空的视觉
+/// 驱动引用——<see cref="HighlightLayer"/>（分步高亮）、提示用 <see cref="Label"/>、以及可选的
+/// <see cref="UnitRenderer"/>/<see cref="MapRenderer"/>/<see cref="FogView"/>（用于收尾/跳过时直达最终态）。
+/// 全部可选依赖均做空值检查（Req 8.6/8.7）。
+/// </para>
+/// </summary>
+public partial class PhaseAnimator : Node2D, IPhaseAnimator
+{
+    private static readonly IReadOnlyList<IReadOnlyList<Vector2D>> EmptyCells =
+        Array.Empty<IReadOnlyList<Vector2D>>();
+
+    // ── 注入依赖（任务 15.2 场景组装接线）─────────────────────────────
+    private PresentationMapper _mapper = null!;
+    private HexLayout _layout = null!;
+    private Side _viewer;
+
+    private HighlightLayer? _highlightLayer;
+    private Label? _promptLabel;
+    private UnitRenderer? _unitRenderer;
+    private MapRenderer? _mapRenderer;
+    private FogView? _fogView;
+
+    // 每一步之间的停顿（秒）。<=0 视为不停顿（便于测试/快速回放）。
+    private double _stepSeconds = 0.6;
+
+    private bool _initialized;
+
+    // 跳过标志：由 Skip() 置位，PlayAsync 各步骤前检查以短路（Req 8.7）。
+    // volatile 以确保跨 await 续体可见。
+    private volatile bool _skipped;
+
+    /// <summary>是否已注入依赖。</summary>
+    public bool IsInitialized => _initialized;
+
+    /// <summary>
+    /// 注入依赖（供任务 15.2 组装场景时调用）。
+    /// </summary>
+    /// <param name="mapper">Core → 视图 DTO 的纯层映射器，用于复用中文日志文案（<see cref="PresentationMapper.LogLines"/>）与收尾同步显示。</param>
+    /// <param name="layout">六角布局，用于把格坐标换算为高亮多边形顶点。</param>
+    /// <param name="viewer">当前观察方阵营，收尾/跳过时按可见度重建显示。</param>
+    /// <param name="highlightLayer">可选：分步高亮层（Req 8.5）。</param>
+    /// <param name="promptLabel">可选：中文文字提示标签（Req 8.5）。</param>
+    /// <param name="unitRenderer">可选：单位渲染器，用于收尾/跳过时直达最终态（Req 8.6/8.7）。</param>
+    /// <param name="mapRenderer">可选：地图渲染器，用于收尾/跳过时直达最终态。</param>
+    /// <param name="fogView">可选：迷雾呈现层，用于收尾/跳过时直达最终态。</param>
+    /// <param name="stepSeconds">每步停顿秒数（默认 0.6；<=0 表示不停顿）。</param>
+    public void Initialize(
+        PresentationMapper mapper,
+        HexLayout layout,
+        Side viewer,
+        HighlightLayer? highlightLayer = null,
+        Label? promptLabel = null,
+        UnitRenderer? unitRenderer = null,
+        MapRenderer? mapRenderer = null,
+        FogView? fogView = null,
+        double stepSeconds = 0.6)
+    {
+        _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
+        _layout = layout ?? throw new ArgumentNullException(nameof(layout));
+        _viewer = viewer;
+        _highlightLayer = highlightLayer;
+        _promptLabel = promptLabel;
+        _unitRenderer = unitRenderer;
+        _mapRenderer = mapRenderer;
+        _fogView = fogView;
+        _stepSeconds = stepSeconds;
+        _initialized = true;
+    }
+
+    /// <inheritdoc />
+    public async Task PlayAsync(
+        GameState before,
+        GameState after,
+        IReadOnlyList<TurnRecordEntry> log,
+        IReadOnlyList<UnitOrder> orders)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        ArgumentNullException.ThrowIfNull(log);
+        ArgumentNullException.ThrowIfNull(orders);
+
+        if (!_initialized)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(PhaseAnimator)} 尚未 {nameof(Initialize)}，无法播放阶段动画。");
+        }
+
+        // 每次播放重置跳过标志（Req 8.7）。
+        _skipped = false;
+
+        try
+        {
+            // 阶段 2（机动/移动）：依提交路径逐格重放，以回合末实际落点收尾（Req 8.4）。
+            await ReplayMovementAsync(after, orders);
+
+            // 阶段 2–8：按回合日志顺序逐条呈现高亮 + 中文提示（文案复用 PresentationMapper）。
+            await ReplayLogAsync(after, log);
+        }
+        finally
+        {
+            // 无论正常播完还是中途跳过，都收尾到结算后最终态（Req 8.6/8.7）。
+            PresentFinalState(after);
+            ClearHighlight();
+        }
+    }
+
+    /// <inheritdoc />
+    public void Skip() => _skipped = true;
+
+    // ── 阶段重建 ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 移动重放：对本回合的 <see cref="Command.Move"/> 命令，沿其提交的 <see cref="UnitOrder.Path"/>
+    /// 逐格高亮，并以回合末 <paramref name="after"/> 中该单位的实际落点收尾（Req 8.4）。
+    /// Core 不回吐逐格中间快照，故轨迹依提交路径近似重放；若计划路径与实际落点不一致（被截断/停下），
+    /// 以实际落点截断/收尾。
+    /// </summary>
+    private async Task ReplayMovementAsync(GameState after, IReadOnlyList<UnitOrder> orders)
+    {
+        foreach (var order in orders)
+        {
+            if (_skipped)
+            {
+                return;
+            }
+
+            if (order.Command != Command.Move || order.Path is not { Count: > 0 } path)
+            {
+                continue;
+            }
+
+            var landing = FindUnitPosition(after, order.Unit);
+            var trajectory = BuildTrajectory(path, landing);
+
+            foreach (var cell in trajectory)
+            {
+                if (_skipped)
+                {
+                    return;
+                }
+
+                SetPrompt($"单位 {FormatUnit(order.Unit)} 移动 → {FormatCell(cell)}");
+                HighlightCell(cell);
+                await StepDelayAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 日志重放：复用 <see cref="PresentationMapper.LogLines"/> 生成的中文文案，按 <c>TurnLog</c> 顺序
+    /// 逐条呈现（Req 8.5、9.2）。每条设置提示文字并高亮其关联格（<see cref="LogLineView.Locate"/>）。
+    /// </summary>
+    private async Task ReplayLogAsync(GameState after, IReadOnlyList<TurnRecordEntry> log)
+    {
+        // 复用映射层文案，避免重复实现 Kind → 中文 的 switch（与 TurnLogView 一致）。
+        IReadOnlyList<LogLineView> lines = _mapper.LogLines(after);
+
+        if (lines.Count == 0)
+        {
+            // 兜底：映射层未产出（理论上与 log 同源同序）。以原始类别键作最小提示，保证不遗漏事件。
+            foreach (var entry in log)
+            {
+                if (_skipped)
+                {
+                    return;
+                }
+
+                SetPrompt(entry.Kind);
+                ClearHighlight();
+                await StepDelayAsync();
+            }
+
+            return;
+        }
+
+        foreach (var line in lines)
+        {
+            if (_skipped)
+            {
+                return;
+            }
+
+            SetPrompt(line.Text);
+
+            if (line.Locate is { } cell)
+            {
+                HighlightCell(cell);
+            }
+            else
+            {
+                ClearHighlight();
+            }
+
+            await StepDelayAsync();
+        }
+    }
+
+    /// <summary>
+    /// 由提交路径与实际落点构造重放轨迹：截断于实际落点（若落点在路径中），否则以落点收尾追加。
+    /// 落点未知（单位已阵亡/不在回合末状态中）时按提交路径原样重放。
+    /// </summary>
+    private static IReadOnlyList<HexCoord> BuildTrajectory(
+        IReadOnlyList<HexCoord> path,
+        HexCoord? landing)
+    {
+        if (landing is not { } dest)
+        {
+            return path;
+        }
+
+        var result = new List<HexCoord>(path.Count + 1);
+        foreach (var cell in path)
+        {
+            result.Add(cell);
+            if (cell == dest)
+            {
+                // 实际落点早于计划终点：以实际落点截断（被 Core 截断/停下的情形）。
+                return result;
+            }
+        }
+
+        // 计划路径未抵达实际落点：以实际落点收尾。
+        if (result.Count == 0 || result[^1] != dest)
+        {
+            result.Add(dest);
+        }
+
+        return result;
+    }
+
+    private static HexCoord? FindUnitPosition(GameState s, UnitId id)
+    {
+        foreach (var unit in s.Units)
+        {
+            if (unit.Id == id)
+            {
+                return unit.Position;
+            }
+        }
+
+        return null;
+    }
+
+    // ── 视觉驱动（全部空值安全）─────────────────────────────────────────
+
+    /// <summary>
+    /// 收尾/跳过时把地图/单位/迷雾直达结算后最终态（Req 8.6/8.7）。敌方按可见度经
+    /// <see cref="PresentationMapper.EnemyUnits"/> 过滤。可选渲染器缺席时安全跳过。
+    /// </summary>
+    private void PresentFinalState(GameState after)
+    {
+        _mapRenderer?.Render(_mapper.MapCells(after));
+
+        if (_unitRenderer is not null || _fogView is not null)
+        {
+            var friendly = _mapper.FriendlyUnits(after, _viewer);
+            var enemies = _mapper.EnemyUnits(after, _viewer);
+            _unitRenderer?.Render(friendly, enemies);
+            _fogView?.ApplyFog(enemies);
+        }
+
+        ClearPrompt();
+    }
+
+    /// <summary>高亮单个格（作为当前步骤的选中高亮）。<see cref="HighlightLayer"/> 或布局缺席时跳过。</summary>
+    private void HighlightCell(HexCoord cell)
+    {
+        if (_highlightLayer is null)
+        {
+            return;
+        }
+
+        var corners = _layout.CornersOf(cell);
+        _highlightLayer.Show(corners, EmptyCells, EmptyCells);
+    }
+
+    private void ClearHighlight() => _highlightLayer?.Clear();
+
+    private void SetPrompt(string text)
+    {
+        if (_promptLabel is null)
+        {
+            return;
+        }
+
+        _promptLabel.Text = text;
+        _promptLabel.Visible = true;
+    }
+
+    private void ClearPrompt()
+    {
+        if (_promptLabel is null)
+        {
+            return;
+        }
+
+        _promptLabel.Text = string.Empty;
+    }
+
+    /// <summary>
+    /// 步骤间停顿（Req 8.5）：经 <c>SceneTreeTimer</c> 等待。已跳过、不在场景树中或停顿 <=0 时不等待，
+    /// 使 <see cref="Skip"/> 后能迅速短路直达最终态（Req 8.7）。
+    /// </summary>
+    private async Task StepDelayAsync()
+    {
+        if (_skipped || _stepSeconds <= 0.0)
+        {
+            return;
+        }
+
+        SceneTree? tree = GetTree();
+        if (tree is null)
+        {
+            return;
+        }
+
+        await ToSignal(tree.CreateTimer(_stepSeconds), SceneTreeTimer.SignalName.Timeout);
+    }
+
+    private static string FormatUnit(UnitId id) =>
+        id.Value.ToString(CultureInfo.InvariantCulture);
+
+    private static string FormatCell(HexCoord c) =>
+        $"({c.Q.ToString(CultureInfo.InvariantCulture)}, {c.R.ToString(CultureInfo.InvariantCulture)})";
+}

@@ -1,0 +1,122 @@
+[gd_scene load_steps=18 format=3 uid="uid://c0match152assembly"]
+
+[ext_resource type="Script" path="res://src/Turn/MatchController.cs" id="1_match"]
+[ext_resource type="Script" path="res://src/Turn/TurnController.cs" id="2_turn"]
+[ext_resource type="Script" path="res://src/Render/CameraController.cs" id="3_camera"]
+[ext_resource type="Script" path="res://src/Render/MapRenderer.cs" id="4_map"]
+[ext_resource type="Script" path="res://src/Render/HighlightLayer.cs" id="5_highlight"]
+[ext_resource type="Script" path="res://src/Render/UnitRenderer.cs" id="6_unit"]
+[ext_resource type="Script" path="res://src/Render/FogView.cs" id="7_fog"]
+[ext_resource type="Script" path="res://src/Render/MovementArrowNode.cs" id="8_arrow"]
+[ext_resource type="Script" path="res://src/Input/SelectionController.cs" id="9_selection"]
+[ext_resource type="Script" path="res://src/Input/PlanningController.cs" id="10_planning"]
+[ext_resource type="Script" path="res://src/Input/RepositionController.cs" id="11_reposition"]
+[ext_resource type="Script" path="res://src/Turn/PhaseAnimator.cs" id="12_phasefx"]
+[ext_resource type="Script" path="res://src/Ui/InfoPanel.cs" id="13_info"]
+[ext_resource type="Script" path="res://src/Ui/TurnLogView.cs" id="14_log"]
+[ext_resource type="Script" path="res://src/Ui/CommandPointView.cs" id="15_cp"]
+[ext_resource type="Script" path="res://src/Ui/DayNightView.cs" id="16_daynight"]
+[ext_resource type="Script" path="res://src/Ui/PhaseControlBar.cs" id="17_phasebar"]
+
+[node name="Match" type="Node2D"]
+script = ExtResource("1_match")
+
+[node name="TurnController" type="Node2D" parent="."]
+script = ExtResource("2_turn")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(320, 240)
+script = ExtResource("3_camera")
+
+[node name="MapLayer" type="Node2D" parent="."]
+script = ExtResource("4_map")
+
+[node name="HighlightLayer" type="Node2D" parent="."]
+script = ExtResource("5_highlight")
+
+[node name="UnitLayer" type="Node2D" parent="."]
+script = ExtResource("6_unit")
+
+[node name="FogView" type="Node2D" parent="UnitLayer"]
+script = ExtResource("7_fog")
+
+[node name="ArrowLayer" type="Node2D" parent="."]
+
+[node name="ActiveArrow" type="Node2D" parent="ArrowLayer"]
+script = ExtResource("8_arrow")
+
+[node name="InputRoot" type="Node2D" parent="."]
+
+[node name="Selection" type="Node2D" parent="InputRoot"]
+script = ExtResource("9_selection")
+
+[node name="Planning" type="Node2D" parent="InputRoot"]
+script = ExtResource("10_planning")
+
+[node name="Reposition" type="Node2D" parent="InputRoot"]
+script = ExtResource("11_reposition")
+
+[node name="PhaseFx" type="Node2D" parent="."]
+script = ExtResource("12_phasefx")
+
+[node name="UiRoot" type="CanvasLayer" parent="."]
+
+[node name="InfoPanel" type="PanelContainer" parent="UiRoot"]
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 258.0
+offset_bottom = 208.0
+script = ExtResource("13_info")
+
+[node name="TurnLogPanel" type="PanelContainer" parent="UiRoot"]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 0.0
+offset_left = -300.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = 320.0
+grow_horizontal = 0
+script = ExtResource("14_log")
+
+[node name="DayNightView" type="HBoxContainer" parent="UiRoot"]
+offset_left = 8.0
+offset_top = 220.0
+offset_right = 258.0
+offset_bottom = 250.0
+script = ExtResource("16_daynight")
+
+[node name="CommandPointView" type="HBoxContainer" parent="UiRoot"]
+offset_left = 8.0
+offset_top = 256.0
+offset_right = 258.0
+offset_bottom = 286.0
+script = ExtResource("15_cp")
+
+[node name="PhaseControlBar" type="HBoxContainer" parent="UiRoot"]
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -200.0
+offset_top = -48.0
+offset_right = 200.0
+offset_bottom = -8.0
+grow_horizontal = 2
+grow_vertical = 0
+script = ExtResource("17_phasebar")
+
+[node name="PromptLabel" type="Label" parent="UiRoot"]
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -200.0
+offset_top = 12.0
+offset_right = 200.0
+offset_bottom = 44.0
+grow_horizontal = 2
+horizontal_alignment = 1
+theme_override_font_sizes/font_size = 18
