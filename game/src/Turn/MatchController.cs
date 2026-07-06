@@ -88,6 +88,7 @@ public partial class MatchController : Node2D
         var mapRenderer = GetNode<MapRenderer>("MapLayer");
         _highlightLayer = GetNode<HighlightLayer>("HighlightLayer");
         var unitRenderer = GetNode<UnitRenderer>("UnitLayer");
+        var combatMarkers = GetNode<CombatMarkerLayer>("CombatMarkerLayer");
         var fogView = GetNode<FogView>("UnitLayer/FogView");
         var activeArrow = GetNode<MovementArrowNode>("ArrowLayer/ActiveArrow");
         _selection = GetNode<SelectionController>("InputRoot/Selection");
@@ -112,7 +113,9 @@ public partial class MatchController : Node2D
             promptLabel,
             unitRenderer,
             mapRenderer,
-            fogView);
+            fogView,
+            combatMarkers,
+            _camera);
 
         _turnController.Initialize(
             initialState,

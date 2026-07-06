@@ -1,4 +1,4 @@
-[gd_scene load_steps=18 format=3 uid="uid://c0match152assembly"]
+[gd_scene load_steps=19 format=3 uid="uid://c0match152assembly"]
 
 [ext_resource type="Script" path="res://src/Turn/MatchController.cs" id="1_match"]
 [ext_resource type="Script" path="res://src/Turn/TurnController.cs" id="2_turn"]
@@ -17,6 +17,7 @@
 [ext_resource type="Script" path="res://src/Ui/CommandPointView.cs" id="15_cp"]
 [ext_resource type="Script" path="res://src/Ui/DayNightView.cs" id="16_daynight"]
 [ext_resource type="Script" path="res://src/Ui/PhaseControlBar.cs" id="17_phasebar"]
+[ext_resource type="Script" path="res://src/Render/CombatMarkerLayer.cs" id="18_combat"]
 
 [node name="Match" type="Node2D"]
 script = ExtResource("1_match")
@@ -39,6 +40,9 @@ script = ExtResource("6_unit")
 
 [node name="FogView" type="Node2D" parent="UnitLayer"]
 script = ExtResource("7_fog")
+
+[node name="CombatMarkerLayer" type="Node2D" parent="."]
+script = ExtResource("18_combat")
 
 [node name="ArrowLayer" type="Node2D" parent="."]
 

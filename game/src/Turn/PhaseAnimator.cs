@@ -63,6 +63,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     private UnitRenderer? _unitRenderer;
     private MapRenderer? _mapRenderer;
     private FogView? _fogView;
+    private CombatMarkerLayer? _combatMarkers;
+    private Camera2D? _camera;
 
     // 每一步之间的停顿（秒）。<=0 视为不停顿（便于测试/快速回放）。
     private double _stepSeconds = 0.6;
@@ -87,6 +89,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// <param name="unitRenderer">可选：单位渲染器，用于收尾/跳过时直达最终态（Req 8.6/8.7）。</param>
     /// <param name="mapRenderer">可选：地图渲染器，用于收尾/跳过时直达最终态。</param>
     /// <param name="fogView">可选：迷雾呈现层，用于收尾/跳过时直达最终态。</param>
+    /// <param name="combatMarkers">可选：战斗位置标识层，逐场结算时亮出/聚焦/消除标识（Req 8.5 扩展）。</param>
+    /// <param name="camera">可选：对局相机，逐场结算时把镜头移到当前战斗格居中（Req 8.5 扩展）。</param>
     /// <param name="stepSeconds">每步停顿秒数（默认 0.6；<=0 表示不停顿）。</param>
     public void Initialize(
         PresentationMapper mapper,
@@ -97,6 +101,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
         UnitRenderer? unitRenderer = null,
         MapRenderer? mapRenderer = null,
         FogView? fogView = null,
+        CombatMarkerLayer? combatMarkers = null,
+        Camera2D? camera = null,
         double stepSeconds = 0.6)
     {
         _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
@@ -107,6 +113,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
         _unitRenderer = unitRenderer;
         _mapRenderer = mapRenderer;
         _fogView = fogView;
+        _combatMarkers = combatMarkers;
+        _camera = camera;
         _stepSeconds = stepSeconds;
         _initialized = true;
     }
@@ -268,36 +276,21 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// </summary>
     private async Task ReplayLogAsync(GameState after, IReadOnlyList<TurnRecordEntry> log)
     {
-        // 复用映射层文案，避免重复实现 Kind → 中文 的 switch（与 TurnLogView 一致）。
-        IReadOnlyList<LogLineView> lines = _mapper.LogLines(after);
-
-        if (lines.Count == 0)
-        {
-            // 兜底：映射层未产出（理论上与 log 同源同序）。以原始类别键作最小提示，保证不遗漏事件。
-            foreach (var entry in log)
-            {
-                if (_skipped)
-                {
-                    return;
-                }
-
-                SetPrompt(entry.Kind);
-                ClearHighlight();
-                await StepDelayAsync();
-            }
-
-            return;
-        }
-
-        foreach (var line in lines)
+        // 1) 非战斗前置事件（临机机动 / 接敌锁定 / 战力快照）：沿用通用提示 + 高亮
+        //    （复用映射层中文文案，与 TurnLogView 一致）。战斗类条目留待第 2 步逐场呈现。
+        foreach (LogLineView line in _mapper.LogLines(after))
         {
             if (_skipped)
             {
                 return;
             }
 
-            SetPrompt(line.Text);
+            if (PresentationMapper.IsCombatKind(line.Kind))
+            {
+                continue;
+            }
 
+            SetPrompt(line.Text);
             if (line.Locate is { } cell)
             {
                 HighlightCell(cell);
@@ -309,6 +302,98 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
             await StepDelayAsync();
         }
+
+        // 2) 战斗：接触阶段一次性亮出全部战斗标识，随后一场一场结算
+        //    （镜头居中 → 描述双方交战的引导文本 → 分步结果 → 消除该场标识）。
+        IReadOnlyList<BattleView> battles = _mapper.Battles(after);
+        if (battles.Count == 0)
+        {
+            return;
+        }
+
+        ShowAllCombatMarkers(battles);
+        ClearHighlight();
+
+        foreach (BattleView battle in battles)
+        {
+            if (_skipped)
+            {
+                break;
+            }
+
+            _combatMarkers?.SetFocus(battle.Cell);
+
+            if (battle.Center is { } center)
+            {
+                await CenterCameraAsync(center);
+            }
+
+            // 一小段描述双方交战的引导文本。
+            SetPrompt(battle.Narrative);
+            await StepDelayAsync();
+
+            // 该场的分步结果（选表/读表/撤退/推进）。
+            foreach (string step in battle.Steps)
+            {
+                if (_skipped)
+                {
+                    break;
+                }
+
+                SetPrompt(step);
+                await StepDelayAsync();
+            }
+
+            _combatMarkers?.ResolveMarker(battle.Cell);
+        }
+
+        _combatMarkers?.Clear();
+    }
+
+    /// <summary>把本回合全部可定位战斗投影为标识并一次性亮出（Req 8.5 扩展）。</summary>
+    private void ShowAllCombatMarkers(IReadOnlyList<BattleView> battles)
+    {
+        if (_combatMarkers is null)
+        {
+            return;
+        }
+
+        var markers = new List<CombatMarkerView>(battles.Count);
+        foreach (var battle in battles)
+        {
+            if (battle.Cell is { } cell && battle.Center is { } center)
+            {
+                markers.Add(new CombatMarkerView(cell, center, battle.Radius));
+            }
+        }
+
+        _combatMarkers.ShowMarkers(markers);
+    }
+
+    /// <summary>
+    /// 把镜头平滑移到给定像素点居中（Req 8.5 扩展）。已跳过、无相机、不在场景树或停顿 &lt;=0 时
+    /// 直接就位，保证 <see cref="Skip"/> 后迅速短路。
+    /// </summary>
+    private async Task CenterCameraAsync(Vector2D center)
+    {
+        if (_camera is null)
+        {
+            return;
+        }
+
+        var target = ToGodot(center);
+        SceneTree? tree = GetTree();
+        if (_skipped || _stepSeconds <= 0.0 || tree is null)
+        {
+            _camera.Position = target;
+            return;
+        }
+
+        // 镜头移动比每步停顿更短促，避免拖慢节奏。
+        var duration = _stepSeconds < 0.35 ? _stepSeconds : 0.35;
+        Tween tween = CreateTween();
+        tween.TweenProperty(_camera, "position", target, duration);
+        await ToSignal(tween, Tween.SignalName.Finished);
     }
 
     /// <summary>
@@ -365,8 +450,9 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// </summary>
     private void PresentFinalState(GameState after)
     {
-        // 清除移动动画的位置覆盖，使棋子按结算后落点绘制（Req 8.4/8.6/8.7）。
+        // 清除移动动画的位置覆盖与战斗标识，使显示回到结算后最终态（Req 8.4/8.6/8.7）。
         _unitRenderer?.ClearAnimationOverrides();
+        _combatMarkers?.Clear();
 
         _mapRenderer?.Render(_mapper.MapCells(after));
 
