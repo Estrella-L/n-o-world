@@ -196,8 +196,11 @@ internal static partial class TurnPipeline
                     s.DayIndex, EncounterKind, unit.Id, null, $"at={pos}"));
             }
 
-            // 落点写入新单位实例；命令性质与其余属性均不变（Req 2.1/4.4）。
-            newUnits.Add(unit with { Position = pos });
+            // 移动布防（MoveHold）：像 Move 一样机动，抵达落点后就地转入据守——命令归为 Hold，
+            // 使其本回合不发起进攻、并从下一回合起在落点产生控制区（Req 3.2「移动到落点再据守」）。
+            // 其余命令保持不变（Req 2.1/4.4）。
+            var landedCommand = order?.Command == Command.MoveHold ? Command.Hold : unit.Command;
+            newUnits.Add(unit with { Position = pos, Command = landedCommand });
         }
 
         // 指挥点消费写回（Req 4.7）。

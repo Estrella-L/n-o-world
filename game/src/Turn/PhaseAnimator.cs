@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading.Tasks;
 using Godot;
 using Xjdl.Core.Hex;
@@ -14,6 +13,30 @@ using Xjdl.Game.Render;
 using Side = Xjdl.Core.State.Side;
 
 namespace Xjdl.Game.Turn;
+
+/// <summary>
+/// 移动节奏策略（Req 8.5 扩展）：决定某单位在动画的<b>每个 tick</b>内前进多少格。
+/// 默认每 tick 前进 1 格（<see cref="UniformMovementPace"/>）；未来的高机动单位可返回 &gt;1
+/// （例如"一帧移动两格"），从而在同一 tick 内比其它单位走得更远——各单位仍在同一 tick 内同时移动。
+/// 实现应为纯函数（同一命令返回同一步数），保证动画可预期。
+/// </summary>
+public interface IMovementPace
+{
+    /// <summary>该命令对应单位每个动画 tick 前进的格数（应 &gt;= 1）。</summary>
+    int CellsPerTick(UnitOrder order);
+}
+
+/// <summary>默认移动节奏：所有单位每 tick 前进固定格数（默认 1）。</summary>
+public sealed class UniformMovementPace : IMovementPace
+{
+    private readonly int _cellsPerTick;
+
+    /// <summary>构造统一节奏。<paramref name="cellsPerTick"/> 会被钳制到至少 1。</summary>
+    public UniformMovementPace(int cellsPerTick = 1) => _cellsPerTick = Math.Max(1, cellsPerTick);
+
+    /// <inheritdoc />
+    public int CellsPerTick(UnitOrder order) => _cellsPerTick;
+}
 
 /// <summary>
 /// 阶段动画器（节点层，Req 8.4/8.5/8.7）。实现 <see cref="IPhaseAnimator"/>，可直接接线到
@@ -66,8 +89,17 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     private CombatMarkerLayer? _combatMarkers;
     private Camera2D? _camera;
 
+    // 移动节奏策略（每 tick 前进几格）。默认每 tick 1 格；可替换以支持高机动单位一 tick 多格。
+    private IMovementPace _movementPace = new UniformMovementPace();
+
+    // 本回合起步前需"挖出"停顿的单位（上回合处于据守/布防姿态）。由 TurnController 每回合注入。
+    private IReadOnlySet<UnitId> _digOutUnits = new HashSet<UnitId>();
+
     // 每一步之间的停顿（秒）。<=0 视为不停顿（便于测试/快速回放）。
     private double _stepSeconds = 0.6;
+
+    // 据守/布防单位本回合移动前的"挖出"停顿 tick 数（Req 8.5 扩展）。
+    private const int DigOutDelayTicks = 2;
 
     private bool _initialized;
 
@@ -77,6 +109,21 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
     /// <summary>是否已注入依赖。</summary>
     public bool IsInitialized => _initialized;
+
+    /// <summary>
+    /// 移动节奏策略（Req 8.5 扩展）：决定每个动画 tick 内各单位前进的格数。默认
+    /// <see cref="UniformMovementPace"/>（每 tick 1 格）。赋 <c>null</c> 时回退到默认。
+    /// 这是为未来"高机动单位一 tick 多格"预留的接口。
+    /// </summary>
+    public IMovementPace MovementPace
+    {
+        get => _movementPace;
+        set => _movementPace = value ?? new UniformMovementPace();
+    }
+
+    /// <inheritdoc />
+    public void SetDigOutUnits(IReadOnlySet<UnitId> units) =>
+        _digOutUnits = units ?? new HashSet<UnitId>();
 
     /// <summary>
     /// 注入依赖（供任务 15.2 组装场景时调用）。
@@ -149,7 +196,7 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
             await ReplayMovementAsync(before, after, orders);
 
             // 阶段 2–8：按回合日志顺序逐条呈现高亮 + 中文提示（文案复用 PresentationMapper）。
-            await ReplayLogAsync(after, log);
+            await ReplayLogAsync(after, log, orders);
         }
         finally
         {
@@ -173,14 +220,12 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     private async Task ReplayMovementAsync(
         GameState before, GameState after, IReadOnlyList<UnitOrder> orders)
     {
+        // 组装每个移动单位的像素轨迹与其每 tick 步数（Req 8.4/8.5）。
+        // 任何带路径的命令都重放移动：移动 / 移动布防 / 进攻准备（接敌路径），先把接敌移动放完再播战斗。
+        var movers = new List<MoverAnim>();
         foreach (var order in orders)
         {
-            if (_skipped)
-            {
-                return;
-            }
-
-            if (order.Command != Command.Move || order.Path is not { Count: > 0 } path)
+            if (order.Path is not { Count: > 0 } path)
             {
                 continue;
             }
@@ -189,7 +234,6 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
             var landing = FindUnitPosition(after, order.Unit);
             var cells = BuildTrajectory(path, landing);
 
-            // 组装像素轨迹：起点中心 + 逐格中心，逐段补间移动棋子。
             var centers = new List<Vector2>(cells.Count + 1);
             if (startPos is { } sp)
             {
@@ -206,44 +250,98 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
                 continue;
             }
 
+            var pace = Math.Max(1, _movementPace.CellsPerTick(order));
+
+            // 上回合处于据守/布防姿态的单位本回合起步前先"挖出"停顿若干 tick（Req 8.5 扩展）。
+            var startDelay = _digOutUnits.Contains(order.Unit) ? DigOutDelayTicks : 0;
+
+            movers.Add(new MoverAnim(order.Unit, centers, pace, startDelay));
+
             // 起始把棋子钉在起点覆盖位，使其脱离同格分组、独立沿轨迹移动。
             _unitRenderer?.SetAnimationOverride(order.Unit, centers[0]);
+        }
 
-            for (var i = 1; i < centers.Count; i++)
+        if (movers.Count == 0)
+        {
+            return;
+        }
+
+        SetPrompt("部队机动中…");
+
+        // 逐 tick 同时推进所有移动单位：每 tick 内每个（已过挖出延迟且未到终点的）单位前进 pace 格，
+        // 各自补间在同一 tick 内并发播放（高机动单位一 tick 走更多格 → 同时移动、走得更远）。
+        var tick = 0;
+        while (!_skipped)
+        {
+            var stillActive = false;
+            var tweens = new List<Tween>();
+
+            foreach (var mover in movers)
             {
-                if (_skipped)
+                if (tick < mover.StartDelayTicks)
                 {
-                    break;
+                    stillActive = true; // 仍在挖出停顿中，尚未起步
+                    continue;
                 }
 
-                SetPrompt($"单位 {FormatUnit(order.Unit)} 移动 → {FormatCell(cells[i - 1])}");
-                HighlightCell(cells[i - 1]);
-                await TweenTokenAsync(order.Unit, centers[i - 1], centers[i]);
+                if (mover.Index >= mover.Centers.Count - 1)
+                {
+                    continue; // 已到终点
+                }
+
+                var next = Math.Min(mover.Index + mover.Pace, mover.Centers.Count - 1);
+                var tween = StartTokenTween(mover.Unit, mover.Centers[mover.Index], mover.Centers[next]);
+                mover.Index = next;
+                if (next < mover.Centers.Count - 1)
+                {
+                    stillActive = true; // 尚有后续格要走
+                }
+
+                if (tween is not null)
+                {
+                    tweens.Add(tween);
+                }
             }
 
-            // 收尾把该单位钉在落点（跳过时也就位）；随后 PresentFinalState 清覆盖并按结算态重绘。
-            _unitRenderer?.SetAnimationOverride(order.Unit, centers[^1]);
+            if (tweens.Count > 0)
+            {
+                await AwaitTweensAsync(tweens);
+            }
+            else if (stillActive)
+            {
+                await StepDelayAsync(); // 本 tick 无移动（都在挖出停顿）→ 等一个 tick 的时长
+            }
+            else
+            {
+                break; // 全部单位已抵达终点
+            }
+
+            tick++;
+        }
+
+        // 收尾：所有单位钉在各自落点（跳过时也就位）；随后 PresentFinalState 清覆盖并按结算态重绘。
+        foreach (var mover in movers)
+        {
+            _unitRenderer?.SetAnimationOverride(mover.Unit, mover.Centers[^1]);
         }
     }
 
     /// <summary>
-    /// 沿单段轨迹平滑移动棋子（Req 8.4/8.5）：经 Godot <c>Tween</c> 在 <see cref="_stepSeconds"/> 内
-    /// 把该单位的动画覆盖位从 <paramref name="from"/> 补间到 <paramref name="to"/>。已跳过、无渲染器、
-    /// 不在场景树或停顿 &lt;=0 时直接就位到终点，保证 <see cref="Skip"/> 后迅速短路（Req 8.7）。
+    /// 为单位启动一段位置补间并返回该 <see cref="Tween"/>（自动运行）；已跳过、无渲染器、不在场景树或
+    /// 停顿 &lt;=0 时直接就位到 <paramref name="to"/> 并返回 <c>null</c>（Req 8.7）。
     /// </summary>
-    private async Task TweenTokenAsync(UnitId unit, Vector2 from, Vector2 to)
+    private Tween? StartTokenTween(UnitId unit, Vector2 from, Vector2 to)
     {
         if (_unitRenderer is null)
         {
-            await StepDelayAsync();
-            return;
+            return null;
         }
 
         SceneTree? tree = GetTree();
         if (_skipped || _stepSeconds <= 0.0 || tree is null)
         {
             _unitRenderer.SetAnimationOverride(unit, to);
-            return;
+            return null;
         }
 
         UnitRenderer renderer = _unitRenderer;
@@ -253,7 +351,24 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
             from,
             to,
             _stepSeconds);
-        await ToSignal(tween, Tween.SignalName.Finished);
+        return tween;
+    }
+
+    /// <summary>
+    /// 等待本 tick 全部并发补间结束。各补间已在同一帧启动、时长相同（<see cref="_stepSeconds"/>），
+    /// 故逐个 await 的总耗时约等于单段时长——达成"同时移动"。已跳过时立即短路（Req 8.7）。
+    /// </summary>
+    private async Task AwaitTweensAsync(IReadOnlyList<Tween> tweens)
+    {
+        foreach (var tween in tweens)
+        {
+            if (_skipped)
+            {
+                return;
+            }
+
+            await ToSignal(tween, Tween.SignalName.Finished);
+        }
     }
 
     /// <summary>按可见度把某状态的己方/敌方单位渲染到棋子层与迷雾层（可选渲染器缺席时安全跳过）。</summary>
@@ -274,7 +389,8 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// 日志重放：复用 <see cref="PresentationMapper.LogLines"/> 生成的中文文案，按 <c>TurnLog</c> 顺序
     /// 逐条呈现（Req 8.5、9.2）。每条设置提示文字并高亮其关联格（<see cref="LogLineView.Locate"/>）。
     /// </summary>
-    private async Task ReplayLogAsync(GameState after, IReadOnlyList<TurnRecordEntry> log)
+    private async Task ReplayLogAsync(
+        GameState after, IReadOnlyList<TurnRecordEntry> log, IReadOnlyList<UnitOrder> orders)
     {
         // 1) 非战斗前置事件（临机机动 / 接敌锁定 / 战力快照）：沿用通用提示 + 高亮
         //    （复用映射层中文文案，与 TurnLogView 一致）。战斗类条目留待第 2 步逐场呈现。
@@ -323,6 +439,9 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
             _combatMarkers?.SetFocus(battle.Cell);
 
+            // 点亮该场各进攻格的主攻单位（多个单位进攻一个敌人时显示主攻，Req 9.2）。
+            _unitRenderer?.SetMainHighlight(BattleMainAttackers(after, orders, battle.Cell));
+
             if (battle.Center is { } center)
             {
                 await CenterCameraAsync(center);
@@ -348,6 +467,63 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
         }
 
         _combatMarkers?.Clear();
+        _unitRenderer?.SetMainHighlight(System.Array.Empty<UnitId>());
+    }
+
+    /// <summary>
+    /// 某场战斗各进攻格的主攻单位集合（Req 9.2）：取所有进攻该目标格的进攻准备单位，按落点分格，
+    /// 每格取进攻力最高（并列取最小 id）者。用于逐场结算时点亮主攻。
+    /// </summary>
+    private static IReadOnlyCollection<UnitId> BattleMainAttackers(
+        GameState after, IReadOnlyList<UnitOrder> orders, HexCoord? cell)
+    {
+        var result = new HashSet<UnitId>();
+        if (cell is not { } target)
+        {
+            return result;
+        }
+
+        var mainByCell = new Dictionary<HexCoord, UnitState>();
+        foreach (var order in orders)
+        {
+            if (order.Command != Command.AttackPrep || order.Target is not { } t || t != target)
+            {
+                continue;
+            }
+
+            var unit = FindUnit(after, order.Unit);
+            if (unit is null)
+            {
+                continue;
+            }
+
+            if (!mainByCell.TryGetValue(unit.Position, out var current)
+                || unit.Attack > current.Attack
+                || (unit.Attack == current.Attack && unit.Id.Value < current.Id.Value))
+            {
+                mainByCell[unit.Position] = unit;
+            }
+        }
+
+        foreach (var main in mainByCell.Values)
+        {
+            result.Add(main.Id);
+        }
+
+        return result;
+    }
+
+    private static UnitState? FindUnit(GameState s, UnitId id)
+    {
+        foreach (var unit in s.Units)
+        {
+            if (unit.Id == id)
+            {
+                return unit;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>把本回合全部可定位战斗投影为标识并一次性亮出（Req 8.5 扩展）。</summary>
@@ -450,8 +626,9 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
     /// </summary>
     private void PresentFinalState(GameState after)
     {
-        // 清除移动动画的位置覆盖与战斗标识，使显示回到结算后最终态（Req 8.4/8.6/8.7）。
+        // 清除移动动画的位置覆盖、主攻高亮与战斗标识，使显示回到结算后最终态（Req 8.4/8.6/8.7）。
         _unitRenderer?.ClearAnimationOverrides();
+        _unitRenderer?.SetMainHighlight(System.Array.Empty<UnitId>());
         _combatMarkers?.Clear();
 
         _mapRenderer?.Render(_mapper.MapCells(after));
@@ -524,9 +701,29 @@ public partial class PhaseAnimator : Node2D, IPhaseAnimator
 
     private static Vector2 ToGodot(Vector2D v) => new((float)v.X, (float)v.Y);
 
-    private static string FormatUnit(UnitId id) =>
-        id.Value.ToString(CultureInfo.InvariantCulture);
+    /// <summary>单个移动单位的动画进度（像素轨迹 + 每 tick 步数 + 起步前挖出停顿 + 当前索引）。</summary>
+    private sealed class MoverAnim
+    {
+        public MoverAnim(UnitId unit, IReadOnlyList<Vector2> centers, int pace, int startDelayTicks)
+        {
+            Unit = unit;
+            Centers = centers;
+            Pace = pace;
+            StartDelayTicks = startDelayTicks;
+        }
 
-    private static string FormatCell(HexCoord c) =>
-        $"({c.Q.ToString(CultureInfo.InvariantCulture)}, {c.R.ToString(CultureInfo.InvariantCulture)})";
+        public UnitId Unit { get; }
+
+        /// <summary>像素轨迹：起点中心 + 逐格中心。</summary>
+        public IReadOnlyList<Vector2> Centers { get; }
+
+        /// <summary>每个 tick 前进的格数（&gt;= 1）。</summary>
+        public int Pace { get; }
+
+        /// <summary>起步前的挖出停顿 tick 数（据守/布防单位本回合移动时先停顿）。</summary>
+        public int StartDelayTicks { get; }
+
+        /// <summary>当前所在轨迹索引（0 起点）。</summary>
+        public int Index { get; set; }
+    }
 }

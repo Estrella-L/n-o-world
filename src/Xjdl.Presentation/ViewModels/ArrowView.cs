@@ -12,4 +12,5 @@ public sealed record ArrowView(
     int UsedCost,
     int MovementBudget,
     bool IsAttackPrep,
-    bool BlockedAhead);
+    bool BlockedAhead,
+    bool IsMoveHold = false);

@@ -16,12 +16,18 @@ public enum UnitClass
     Special,
 }
 
-/// <summary>阶段 0 下达的命令：移动/进攻准备/据守（Req 3.2）。</summary>
+/// <summary>
+/// 阶段 0 下达的命令：移动/进攻准备/据守/移动布防（Req 3.2）。
+/// <para><see cref="MoveHold"/>（移动布防）：像 <see cref="Move"/> 一样沿路径机动到落点，
+/// 但抵达后就地转入据守姿态——本回合不发起进攻，机动结算末其命令归为 <see cref="Hold"/>，
+/// 于是从下一回合起在落点产生控制区（"移动到落点再据守"）。</para>
+/// </summary>
 public enum Command
 {
     Move,
     AttackPrep,
     Hold,
+    MoveHold,
 }
 
 /// <summary>交战表：表一（进攻）/表二（对攻）/表三（遭遇）（Req 5.1–5.3）。</summary>

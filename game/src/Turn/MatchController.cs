@@ -87,6 +87,7 @@ public partial class MatchController : Node2D
         _camera = GetNode<Camera2D>("Camera2D");
         var mapRenderer = GetNode<MapRenderer>("MapLayer");
         _highlightLayer = GetNode<HighlightLayer>("HighlightLayer");
+        var zocView = GetNode<ZoneOfControlView>("ZocLayer");
         var unitRenderer = GetNode<UnitRenderer>("UnitLayer");
         var combatMarkers = GetNode<CombatMarkerLayer>("CombatMarkerLayer");
         var fogView = GetNode<FogView>("UnitLayer/FogView");
@@ -132,7 +133,7 @@ public partial class MatchController : Node2D
 
         _selection.Initialize(initialState, _mapper, _layout, _highlightLayer, _viewer);
 
-        _planning.Initialize(initialState, data, _layout, _mapper, activeArrow, _viewer);
+        _planning.Initialize(initialState, data, _layout, _mapper, activeArrow, _viewer, zocView);
         _planning.PlanningEnabled = true;
 
         infoPanel.Initialize(_selection, _mapper, () => _turnController.Current, _viewer);

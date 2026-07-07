@@ -40,6 +40,10 @@ public partial class UnitRenderer : Node2D
     // 有覆盖的单位在 _Draw 中脱离同格分组、按覆盖位单独绘制于最上层。
     private readonly Dictionary<int, Vector2> _animOverrides = new();
 
+    // 战斗中被标为"主攻单位"的单位（UnitId.Value）：无论是否同格堆叠都加金圈。
+    // 由 PhaseAnimator 在逐场结算时点亮当前场的主攻攻击者，结算完清除。
+    private readonly HashSet<int> _mainHighlight = new();
+
     /// <summary>
     /// 用新快照的己方与敌方视图整体替换绘制集合并触发重绘（Req 4.1/4.5）。
     /// 敌方列表已由 <c>PresentationMapper</c> 按可见度过滤：仅含 Identified / Spotted，
@@ -75,6 +79,24 @@ public partial class UnitRenderer : Node2D
         QueueRedraw();
     }
 
+    /// <summary>
+    /// 设置战斗中的"主攻单位"高亮集合并重绘（Req 9.2）：这些单位无论是否同格堆叠都加金圈，
+    /// 用于"多个单位进攻一个敌人"时点出各进攻格的主攻。传空集清除。
+    /// </summary>
+    public void SetMainHighlight(IReadOnlyCollection<UnitId> units)
+    {
+        _mainHighlight.Clear();
+        if (units is not null)
+        {
+            foreach (var unit in units)
+            {
+                _mainHighlight.Add(unit.Value);
+            }
+        }
+
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         // 按所在格聚合，使同格多个棋子以叠放偏移 + 数量角标呈现（Req 4.4）。
@@ -92,7 +114,8 @@ public partial class UnitRenderer : Node2D
                 ClassLabel: ClassLabel(u.Class),
                 Stats: FormatStats(u.Attack, u.Defense, u.ResilienceLeft),
                 StackCount: u.StackCount,
-                Unknown: false);
+                Unknown: false,
+                IsMain: (u.IsMain && u.StackCount > 1) || _mainHighlight.Contains(u.Id.Value));
 
             if (_animOverrides.TryGetValue(u.Id.Value, out Vector2 overrideCenter))
             {
@@ -114,7 +137,8 @@ public partial class UnitRenderer : Node2D
                 ClassLabel: identified && e.Class.HasValue ? ClassLabel(e.Class.Value) : "?",
                 Stats: identified ? FormatStats(e.Attack, e.Defense, e.ResilienceLeft) : null,
                 StackCount: identified ? e.StackCount : null,
-                Unknown: !identified);
+                Unknown: !identified,
+                IsMain: false);
 
             if (_animOverrides.TryGetValue(e.Id.Value, out Vector2 overrideCenter))
             {
@@ -128,6 +152,12 @@ public partial class UnitRenderer : Node2D
 
         foreach (List<Token> stack in groups.Values)
         {
+            // 主攻单位排到最后绘制（叠放在最上），便于在堆叠中一眼看清（Req 9.2）。
+            if (stack.Count > 1)
+            {
+                stack.Sort(static (a, b) => a.IsMain.CompareTo(b.IsMain));
+            }
+
             for (int i = 0; i < stack.Count; i++)
             {
                 Vector2 center = stack[i].Center + (StackOffset * i);
@@ -158,6 +188,13 @@ public partial class UnitRenderer : Node2D
         // 阵营色填充 + 深色描边，作为可区分占位棋子（Req 4.2）。
         DrawCircle(center, TokenRadius, token.FillColor);
         DrawArc(center, TokenRadius, 0f, Mathf.Tau, 32, OutlineColor, 2f, true);
+
+        // 主攻单位加一圈金色描边（仅其攻/防计入火力比，Req 9.2）：
+        // 同格堆叠的主攻、或战斗中被点名的主攻攻击者。
+        if (token.IsMain)
+        {
+            DrawArc(center, TokenRadius + 3f, 0f, Mathf.Tau, 32, MainOutlineColor, 2.5f, true);
+        }
 
         Font font = ThemeDB.FallbackFont;
 
@@ -195,6 +232,9 @@ public partial class UnitRenderer : Node2D
     // 未明（Spotted）敌方：中性灰块 + "?" 标记（Req 10.3）。
     private static readonly Color SpottedColor = new(0.45f, 0.45f, 0.48f);
     private static readonly Color OutlineColor = new(0.08f, 0.08f, 0.10f);
+
+    // 主攻单位标识：金色描边（Req 9.2）。
+    private static readonly Color MainOutlineColor = new(1f, 0.85f, 0.20f, 0.95f);
     private static readonly Color LabelColor = new(1f, 1f, 1f);
     private static readonly Color StatsColor = new(0.95f, 0.95f, 0.80f);
     private static readonly Color BadgeColor = new(0.12f, 0.12f, 0.14f);
@@ -230,5 +270,6 @@ public partial class UnitRenderer : Node2D
         string ClassLabel,
         string? Stats,
         int? StackCount,
-        bool Unknown);
+        bool Unknown,
+        bool IsMain);
 }

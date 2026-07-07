@@ -1,3 +1,4 @@
+using Xjdl.Core.Combat;
 using Xjdl.Core.Hex;
 using Xjdl.Core.State;
 using Xjdl.Data.Loading;
@@ -79,6 +80,7 @@ public sealed partial class PresentationMapper
         ArgumentNullException.ThrowIfNull(s);
 
         var stackCounts = StackCountsByCell(s, viewer);
+        var mainByCell = MainUnitIdByCell(s, viewer);
 
         var views = new List<UnitView>();
         foreach (var unit in s.Units)
@@ -87,6 +89,8 @@ public sealed partial class PresentationMapper
             {
                 continue;
             }
+
+            var isMain = mainByCell.TryGetValue(unit.Position, out var mainId) && mainId == unit.Id;
 
             views.Add(new UnitView(
                 unit.Id,
@@ -100,7 +104,8 @@ public sealed partial class PresentationMapper
                 unit.Movement,
                 unit.Vision,
                 unit.Command,
-                stackCounts[unit.Position]));
+                stackCounts[unit.Position],
+                isMain));
         }
 
         views.Sort((a, b) => a.Id.Value.CompareTo(b.Id.Value));
@@ -177,6 +182,41 @@ public sealed partial class PresentationMapper
     }
 
     // ── 内部辅助 ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 每格指定阵营的「主攻单位」id（Req 9.2）：复用 Core 的 <see cref="Stacking.SelectMainUnit"/>
+    /// 规则（进攻力最高、并列取最小 id）。供多个单位同格时标识主攻单位——仅其攻/防计入火力比。
+    /// </summary>
+    private static IReadOnlyDictionary<HexCoord, UnitId> MainUnitIdByCell(GameState s, Side side)
+    {
+        var byCell = new Dictionary<HexCoord, List<UnitState>>();
+        foreach (var unit in s.Units)
+        {
+            if (unit.Owner != side)
+            {
+                continue;
+            }
+
+            if (!byCell.TryGetValue(unit.Position, out var list))
+            {
+                list = new List<UnitState>();
+                byCell[unit.Position] = list;
+            }
+
+            list.Add(unit);
+        }
+
+        var result = new Dictionary<HexCoord, UnitId>(byCell.Count);
+        foreach (var kv in byCell)
+        {
+            if (Stacking.SelectMainUnit(kv.Value) is { } main)
+            {
+                result[kv.Key] = main.Id;
+            }
+        }
+
+        return result;
+    }
 
     /// <summary>按格统计指定阵营的同格堆叠数量。</summary>
     private static Dictionary<HexCoord, int> StackCountsByCell(GameState s, Side side)

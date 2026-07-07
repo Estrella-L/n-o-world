@@ -43,6 +43,9 @@ public partial class MovementArrowNode : Node2D
     // 进攻准备：醒目橙红虚线。
     private static readonly Color AttackPrepColor = new(0.95f, 0.35f, 0.20f, 0.95f);
 
+    // 移动布防：青绿实线 + 末端盾牌方块，区别于普通移动。
+    private static readonly Color MoveHoldColor = new(0.20f, 0.75f, 0.55f, 0.95f);
+
     // 超限/禁入：警示黄红。
     private static readonly Color BlockedColor = new(0.95f, 0.20f, 0.15f, 1.0f);
 
@@ -76,17 +79,24 @@ public partial class MovementArrowNode : Node2D
             return;
         }
 
-        // 进攻准备与普通移动样式区分；超限/禁入以警示色覆盖（Req 6.5）。
+        // 样式区分（Req 6.5）：进攻准备（橙红虚线）/ 移动布防（青绿实线+盾牌）/ 普通移动（蓝实线）；
+        // 超限/禁入以警示色覆盖。
         Color lineColor = arrow.BlockedAhead
             ? BlockedColor
-            : arrow.IsAttackPrep ? AttackPrepColor : MoveColor;
+            : arrow.IsAttackPrep ? AttackPrepColor
+            : arrow.IsMoveHold ? MoveHoldColor
+            : MoveColor;
 
         // 折线主体：进攻准备用虚线区分，其余用实线（Req 6.2/6.5）。
         DrawPath(points, lineColor, arrow.IsAttackPrep);
 
-        // 末段箭头（Req 6.2）：需要至少两个点确定方向。
+        // 末端标记（Req 6.2/6.5）：移动布防画盾牌方块（就地据守），其余画箭头。
         Vector2 tip = points[^1];
-        if (points.Length >= 2)
+        if (arrow.IsMoveHold)
+        {
+            DrawShieldMarker(tip, lineColor);
+        }
+        else if (points.Length >= 2)
         {
             Vector2 from = points[^2];
             DrawArrowHead(from, tip, lineColor);
@@ -168,6 +178,15 @@ public partial class MovementArrowNode : Node2D
         Vector2 right = baseCenter - (normal * ArrowHeadHalfWidth);
 
         DrawColoredPolygon(new[] { tip, left, right }, color);
+    }
+
+    /// <summary>在落点画盾牌方块，标记"移动到落点后据守/布防"（Req 3.2）。</summary>
+    private void DrawShieldMarker(Vector2 center, Color color)
+    {
+        const float s = 8f;
+        var rect = new Rect2(center - new Vector2(s, s), new Vector2(2f * s, 2f * s));
+        DrawRect(rect, color, true);
+        DrawRect(rect, new Color(0f, 0f, 0f, 0.7f), false, 1.5f);
     }
 
     /// <summary>在终点画醒目叉号，标记超机动点/禁入地形（Req 6.5）。</summary>

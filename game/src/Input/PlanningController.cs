@@ -52,7 +52,15 @@ public partial class PlanningController : Node2D
 
         /// <summary>已提交：最近一次拖拽已组装为 <see cref="Command.Move"/>/<see cref="Command.AttackPrep"/> 并保留箭头。</summary>
         Committed,
+
+        /// <summary>等待终点姿态选择：拖拽已松手、正在等玩家从终点上下文菜单选择姿态（移动/移动布防/进攻准备）。</summary>
+        AwaitingPosture,
     }
+
+    // 终点姿态菜单项 id（Req 6.x 扩展：终点上下文菜单）。
+    private const int PostureMove = 0;
+    private const int PostureMoveHold = 1;
+    private const int PostureAttackPrep = 2;
 
     // ── 注入依赖（Req 6.x；任务 15.2 场景组装接线）─────────────────────
     private GameState _gameState = null!;
@@ -60,6 +68,7 @@ public partial class PlanningController : Node2D
     private HexLayout _layout = null!;
     private PresentationMapper _mapper = null!;
     private MovementArrowNode? _activeArrow;
+    private ZoneOfControlView? _zocView;
     private Side _viewer;
     private bool _initialized;
 
@@ -81,6 +90,14 @@ public partial class PlanningController : Node2D
     // 本次拖拽已记忆的途径点（不含起点，按经过顺序）。按住 Shift 拖动时逐格记忆，
     // 使路径能绕行/画弧而非只取最近路（经 PathPlanner.ExtendThrough 依次穿过）。
     private readonly List<HexCoord> _waypoints = new();
+
+    // ── 终点姿态上下文菜单（主交互）──────────────────────────────────
+    private PopupMenu? _postureMenu;
+    private bool _menuHandled;
+    private UnitId _pendingUnit;
+    private PathDraft _pendingDraft;
+    private HexCoord _pendingEndpoint;
+    private HexCoord? _pendingAttackTarget;
 
     /// <summary>
     /// 是否处于计划阶段并接受下令（Req 6.12）。仅当为 <c>true</c> 时处理鼠标下令输入；
@@ -105,13 +122,15 @@ public partial class PlanningController : Node2D
     /// <param name="mapper">命令组装映射层。</param>
     /// <param name="activeArrow">绘制拖拽预览与选中单位已提交箭头的节点；可为 <c>null</c>（无预览）。</param>
     /// <param name="viewer">当前观察方（下令一方）。</param>
+    /// <param name="zocView">可选：控制区显示层，按当前计划实时展示据守/布防单位的控制区（可为 <c>null</c>）。</param>
     public void Initialize(
         GameState state,
         GameData data,
         HexLayout layout,
         PresentationMapper mapper,
         MovementArrowNode? activeArrow,
-        Side viewer)
+        Side viewer,
+        ZoneOfControlView? zocView = null)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(data);
@@ -123,10 +142,26 @@ public partial class PlanningController : Node2D
         _layout = layout;
         _mapper = mapper;
         _activeArrow = activeArrow;
+        _zocView = zocView;
         _viewer = viewer;
         _initialized = true;
 
+        EnsurePostureMenu();
         ResetOrders();
+    }
+
+    // 惰性创建终点姿态菜单（PopupMenu），连接选择与关闭信号。
+    private void EnsurePostureMenu()
+    {
+        if (_postureMenu is not null)
+        {
+            return;
+        }
+
+        _postureMenu = new PopupMenu { Name = "PostureMenu" };
+        AddChild(_postureMenu);
+        _postureMenu.IdPressed += OnPostureSelected;
+        _postureMenu.PopupHide += OnPostureMenuClosed;
     }
 
     /// <summary>
@@ -189,12 +224,20 @@ public partial class PlanningController : Node2D
         {
             _dragState = DragState.Idle;
         }
+
+        RefreshZoc();
     }
 
     /// <inheritdoc/>
     public override void _UnhandledInput(InputEvent @event)
     {
         if (!_initialized || !PlanningEnabled)
+        {
+            return;
+        }
+
+        // 终点姿态菜单开启期间，忽略地图输入，交由菜单处理（选择或点击别处关闭）。
+        if (_dragState == DragState.AwaitingPosture)
         {
             return;
         }
@@ -307,44 +350,190 @@ public partial class PlanningController : Node2D
         }
     }
 
-    // 松开左键：按终点组装命令并转移状态（Req 6.5/6.8/6.9）。
+    // 松开左键：终点弹出上下文菜单选择姿态（主交互）；仅起点/无位移且非敌格时直接据守，不弹菜单。
     private void EndDrag(Vector2 world)
     {
-        _activeArrow?.Render(null); // 撤下拖拽预览，交由持久箭头呈现已提交计划。
-
         var unit = _dragUnit;
-        var start = _draft.Path.Count > 0 ? _draft.Path[0] : default;
         var hoverHex = _layout.CoordAt(ToVector2D(world));
         _planner = null;
 
-        // 终点落在敌方目标格 → 进攻准备（Req 6.8）。
-        if (EnemyAt(hoverHex))
+        var hasMovement = _draft.Path.Count > 1;
+        var enemyHere = EnemyAt(hoverHex);
+
+        // 仅起点、无位移且非敌格 → 直接据守（Req 6.9），无需菜单。
+        if (!hasMovement && !enemyHere)
         {
-            _orders[unit] = _mapper.BuildAttackPrepOrder(unit, hoverHex);
-            ShowCommittedArrow(unit, BuildAttackArrowView(unit, start, hoverHex, _draft.MovementBudget));
-            _dragState = DragState.Committed;
+            _activeArrow?.Render(null);
+            _orders[unit] = _mapper.BuildHoldOrder(unit);
+            RemoveCommittedArrow(unit);
+            _dragState = DragState.Idle;
+            RefreshZoc();
             return;
         }
 
-        // 有实际位移（起点之外至少一格）→ 移动（Req 6.5）。Core 期望的 Path 不含出发格，故剔除起点。
-        if (_draft.Path.Count > 1)
+        // 记录待定拖拽并弹出终点姿态菜单。
+        _pendingUnit = unit;
+        _pendingDraft = _draft;
+        _pendingEndpoint = hoverHex;
+        _pendingAttackTarget = enemyHere ? hoverHex : EnemyAdjacentTo(hoverHex);
+
+        _activeArrow?.Render(null); // 撤下预览，选定姿态后再画持久箭头。
+        OpenPostureMenu(enemyHere, hasMovement);
+        _dragState = DragState.AwaitingPosture;
+    }
+
+    // 依终点上下文构造并弹出姿态菜单（Req 6.5/6.8 扩展）：
+    // 敌格 → 进攻准备；空格 → 移动 / 移动布防（+ 若终点与敌相邻则进攻准备）。
+    private void OpenPostureMenu(bool enemyHere, bool hasMovement)
+    {
+        EnsurePostureMenu();
+        _postureMenu!.Clear();
+        _menuHandled = false;
+
+        if (enemyHere)
         {
-            var movePath = new List<HexCoord>(_draft.Path.Count - 1);
-            for (var i = 1; i < _draft.Path.Count; i++)
+            _postureMenu.AddItem("进攻准备", PostureAttackPrep);
+        }
+        else
+        {
+            if (hasMovement)
             {
-                movePath.Add(_draft.Path[i]);
+                _postureMenu.AddItem("移动", PostureMove);
+                _postureMenu.AddItem("移动布防", PostureMoveHold);
             }
 
-            _orders[unit] = _mapper.BuildMoveOrder(unit, movePath);
-            ShowCommittedArrow(unit, BuildMoveArrowView(_draft));
-            _dragState = DragState.Committed;
+            if (_pendingAttackTarget is not null)
+            {
+                _postureMenu.AddItem("进攻准备", PostureAttackPrep);
+            }
+        }
+
+        var mouse = GetViewport().GetMousePosition();
+        _postureMenu.Position = new Vector2I((int)mouse.X, (int)mouse.Y);
+        _postureMenu.ResetSize();
+        _postureMenu.Popup();
+    }
+
+    // 菜单选择：按所选姿态组装命令并画持久箭头（Req 6.5/6.8）。
+    private void OnPostureSelected(long id)
+    {
+        _menuHandled = true;
+
+        switch ((int)id)
+        {
+            case PostureMove:
+                CommitMove(_pendingUnit);
+                break;
+
+            case PostureMoveHold:
+                CommitMoveHold(_pendingUnit);
+                break;
+
+            case PostureAttackPrep:
+                CommitAttackPrep(_pendingUnit);
+                break;
+        }
+
+        _dragState = DragState.Committed;
+    }
+
+    // 移动：沿草案路径提交移动命令并画箭头（Req 6.5）。
+    private void CommitMove(UnitId unit)
+    {
+        var path = MovePathFrom(_pendingDraft);
+        if (path.Count == 0)
+        {
             return;
         }
 
-        // 仅起点（未画出有效路径）→ 视为据守（Req 6.9）。
-        _orders[unit] = _mapper.BuildHoldOrder(unit);
-        RemoveCommittedArrow(unit);
-        _dragState = DragState.Idle;
+        _orders[unit] = _mapper.BuildMoveOrder(unit, path);
+        ShowCommittedArrow(unit, BuildMoveArrowView(_pendingDraft));
+        RefreshZoc();
+    }
+
+    // 移动布防：沿草案路径提交移动布防命令（落点据守）并画箭头（Req 3.2「移动到落点再据守」）。
+    private void CommitMoveHold(UnitId unit)
+    {
+        var path = MovePathFrom(_pendingDraft);
+        if (path.Count == 0)
+        {
+            return;
+        }
+
+        _orders[unit] = _mapper.BuildMoveHoldOrder(unit, path);
+        ShowCommittedArrow(unit, BuildMoveArrowView(_pendingDraft, isMoveHold: true));
+        RefreshZoc();
+    }
+
+    // 进攻准备：以待定目标（敌格或相邻敌格）提交进攻准备命令并画进攻箭头（Req 6.8）。
+    // 采用"移动接敌"模型：命令携带接敌路径，单位先机动到目标相邻格再发起进攻。
+    private void CommitAttackPrep(UnitId unit)
+    {
+        var target = _pendingAttackTarget ?? _pendingEndpoint;
+        var approach = ApproachPath(_pendingDraft, target);
+        _orders[unit] = _mapper.BuildAttackPrepOrder(unit, target, approach);
+        ShowCommittedArrow(unit, BuildAttackArrowView(_pendingDraft, target));
+        RefreshZoc();
+    }
+
+    // 接敌路径：草案路径去掉出发格；若末格正是目标敌格则去掉（停在相邻格、不进入敌格）。
+    private static List<HexCoord> ApproachPath(PathDraft draft, HexCoord target)
+    {
+        var path = MovePathFrom(draft);
+        if (path.Count > 0 && path[^1] == target)
+        {
+            path.RemoveAt(path.Count - 1);
+        }
+
+        return path;
+    }
+
+    // 菜单关闭：若未选择（点击别处取消）→ 取消本次下令，回到空闲，不改动既有命令。
+    private void OnPostureMenuClosed()
+    {
+        if (_menuHandled)
+        {
+            return;
+        }
+
+        if (_dragState == DragState.AwaitingPosture)
+        {
+            _dragState = DragState.Idle;
+        }
+    }
+
+    // 从草案提取 Core 期望的移动路径（不含出发格）。
+    private static List<HexCoord> MovePathFrom(PathDraft draft)
+    {
+        var movePath = new List<HexCoord>(System.Math.Max(0, draft.Path.Count - 1));
+        for (var i = 1; i < draft.Path.Count; i++)
+        {
+            movePath.Add(draft.Path[i]);
+        }
+
+        return movePath;
+    }
+
+    // 与给定格六角相邻的敌方单位所在格（供空格终点也能选进攻准备）；取 (Q,R) 字典序最小者，保持确定。
+    private HexCoord? EnemyAdjacentTo(HexCoord hex)
+    {
+        HexCoord? best = null;
+        foreach (var unit in _gameState.Units)
+        {
+            if (unit.Owner == _viewer || unit.Position.DistanceTo(hex) != 1)
+            {
+                continue;
+            }
+
+            if (best is null
+                || unit.Position.Q < best.Value.Q
+                || (unit.Position.Q == best.Value.Q && unit.Position.R < best.Value.R))
+            {
+                best = unit.Position;
+            }
+        }
+
+        return best;
     }
 
     // 取消进行中的拖拽（不改动已提交命令），撤下预览箭头。
@@ -356,6 +545,15 @@ public partial class PlanningController : Node2D
             _dragState = DragState.Idle;
         }
 
+        // 关闭进行中的终点姿态菜单（若有），避免跨状态悬挂。
+        if (_dragState == DragState.AwaitingPosture)
+        {
+            _dragState = DragState.Idle;
+        }
+
+        _menuHandled = true; // 抑制关闭回调的"取消"分支（此处为主动取消）。
+        _postureMenu?.Hide();
+
         _planner = null;
         _waypoints.Clear();
     }
@@ -365,7 +563,7 @@ public partial class PlanningController : Node2D
     private void RenderActivePreview() => _activeArrow?.Render(BuildMoveArrowView(_draft, _dragIsAttackPrep));
 
     // 由移动草案构建箭头视图：逐格中心连成折线，携带消耗/机动点与超限/禁入提示（Req 6.2/6.5）。
-    private ArrowView BuildMoveArrowView(PathDraft draft, bool isAttackPrep = false)
+    private ArrowView BuildMoveArrowView(PathDraft draft, bool isAttackPrep = false, bool isMoveHold = false)
     {
         var points = new List<Vector2D>(draft.Path.Count);
         foreach (var hex in draft.Path)
@@ -379,19 +577,30 @@ public partial class PlanningController : Node2D
             draft.UsedCost,
             draft.MovementBudget,
             isAttackPrep,
-            draft.BlockedAhead);
+            draft.BlockedAhead,
+            IsMoveHold: isMoveHold);
     }
 
-    // 进攻准备箭头：由单位起点直指目标敌格，以进攻准备样式呈现（Req 6.8）。
-    private ArrowView BuildAttackArrowView(UnitId unit, HexCoord start, HexCoord target, int movementBudget)
+    // 进攻准备箭头：沿接敌路径逐格中心连线、再指向目标敌格（Req 6.8）。
+    // 之前是「起点中心→目标中心」的直线，会斜穿而不经过途经格的中心点；改为跟随实际接敌路径。
+    private ArrowView BuildAttackArrowView(PathDraft draft, HexCoord target)
     {
-        var points = new List<Vector2D>
+        var points = new List<Vector2D>(draft.Path.Count + 1);
+        foreach (var hex in draft.Path)
         {
-            _layout.CenterOf(start),
-            _layout.CenterOf(target),
-        };
+            points.Add(_layout.CenterOf(hex));
+        }
 
-        return new ArrowView(unit, points, UsedCost: 0, movementBudget, IsAttackPrep: true, BlockedAhead: false);
+        // 路径未直接抵达目标格时，追加目标中心作为最后的进攻指向段。
+        var targetCenter = _layout.CenterOf(target);
+        if (points.Count == 0 || points[^1] != targetCenter)
+        {
+            points.Add(targetCenter);
+        }
+
+        return new ArrowView(
+            draft.Unit, points, draft.UsedCost, draft.MovementBudget,
+            IsAttackPrep: true, draft.BlockedAhead);
     }
 
     private void ShowCommittedArrow(UnitId unit, ArrowView view)
@@ -454,6 +663,58 @@ public partial class PlanningController : Node2D
         {
             _orders[unit.Id] = _mapper.BuildHoldOrder(unit.Id);
         }
+
+        RefreshZoc();
+    }
+
+    // 依当前计划命令刷新控制区显示：据守单位以当前位置、移动布防单位以落点为锚，取其六个相邻格（Req 11.1–11.3）。
+    private void RefreshZoc()
+    {
+        if (_zocView is null)
+        {
+            return;
+        }
+
+        var cells = new List<IReadOnlyList<Vector2D>>();
+        var seen = new HashSet<HexCoord>();
+
+        foreach (var (unitId, order) in _orders)
+        {
+            HexCoord? anchor = order.Command switch
+            {
+                Command.Hold => UnitPosition(unitId),
+                Command.MoveHold when order.Path is { Count: > 0 } path => path[^1],
+                _ => null,
+            };
+
+            if (anchor is not { } center)
+            {
+                continue;
+            }
+
+            foreach (var neighbor in center.Neighbors())
+            {
+                if (seen.Add(neighbor))
+                {
+                    cells.Add(_layout.CornersOf(neighbor));
+                }
+            }
+        }
+
+        _zocView.Show(cells);
+    }
+
+    private HexCoord? UnitPosition(UnitId unit)
+    {
+        foreach (var u in _gameState.Units)
+        {
+            if (u.Id == unit)
+            {
+                return u.Position;
+            }
+        }
+
+        return null;
     }
 
     private IEnumerable<UnitState> FriendlyUnitsOrdered() =>

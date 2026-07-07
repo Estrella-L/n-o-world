@@ -133,7 +133,7 @@ public partial class MainMenu : Control
 
         if (GetNodeOrNull<Label>("%Title") is null)
         {
-            layout.AddChild(new Label { Name = "Title", Text = "新旧大陆" });
+            layout.AddChild(new Label { Name = "Title", Text = "Old & New World" });
         }
 
         _newGameButton ??= AddMenuButton(layout, "BtnNewGame", "开始新对局");

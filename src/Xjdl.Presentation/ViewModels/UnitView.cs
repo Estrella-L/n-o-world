@@ -19,4 +19,5 @@ public sealed record UnitView(
     int Movement,
     int Vision,
     Command CurrentCommand,
-    int StackCount);
+    int StackCount,
+    bool IsMain);

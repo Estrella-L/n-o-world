@@ -92,7 +92,12 @@ internal static partial class TurnPipeline
     /// <returns>执行完阶段 0..9 后的新状态。</returns>
     public static GameState Run(GameState s, TurnCommands cmds, ISeededRng rng)
     {
-        var state = s;
+        // 回合日志按回合重置：TurnLog 仅承载「本回合」的审计/动画事件，绝不跨回合累加。
+        // 否则历史的锁定/遭遇/战斗结果会随 s.TurnLog 被每个阶段整段拷贝并不断追加，导致：
+        // (1) 表现层每回合把所有历史事件重放一遍（如“击退敌人后下一回合一堆单位莫名接敌锁定”）；
+        // (2) 存档体积随回合无限膨胀。
+        // 回放按 (初始状态 + 每回合命令流 + 种子) 重演、不依赖累加日志（见 Replays.RunReplay），故此处清空安全。
+        var state = s with { TurnLog = Array.Empty<TurnRecordEntry>() };
         foreach (var step in Phases)
         {
             state = step.Transform(state, cmds, rng);

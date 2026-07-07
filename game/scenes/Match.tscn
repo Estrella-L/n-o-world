@@ -1,4 +1,4 @@
-[gd_scene load_steps=19 format=3 uid="uid://c0match152assembly"]
+[gd_scene load_steps=20 format=3 uid="uid://c0match152assembly"]
 
 [ext_resource type="Script" path="res://src/Turn/MatchController.cs" id="1_match"]
 [ext_resource type="Script" path="res://src/Turn/TurnController.cs" id="2_turn"]
@@ -18,6 +18,7 @@
 [ext_resource type="Script" path="res://src/Ui/DayNightView.cs" id="16_daynight"]
 [ext_resource type="Script" path="res://src/Ui/PhaseControlBar.cs" id="17_phasebar"]
 [ext_resource type="Script" path="res://src/Render/CombatMarkerLayer.cs" id="18_combat"]
+[ext_resource type="Script" path="res://src/Render/ZoneOfControlView.cs" id="19_zoc"]
 
 [node name="Match" type="Node2D"]
 script = ExtResource("1_match")
@@ -31,6 +32,9 @@ script = ExtResource("3_camera")
 
 [node name="MapLayer" type="Node2D" parent="."]
 script = ExtResource("4_map")
+
+[node name="ZocLayer" type="Node2D" parent="."]
+script = ExtResource("19_zoc")
 
 [node name="HighlightLayer" type="Node2D" parent="."]
 script = ExtResource("5_highlight")

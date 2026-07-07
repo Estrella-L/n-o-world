@@ -35,4 +35,10 @@ public interface IPhaseAnimator
 
     /// <summary>跳过动画，直接呈现结算后的最终状态（Req 8.7）。</summary>
     void Skip();
+
+    /// <summary>
+    /// 设置本回合起步前需"挖出"停顿的单位集合（上回合处于据守/布防姿态者，Req 8.5 扩展）。
+    /// 由 <see cref="TurnController"/> 在每回合结算前注入；缺省为空集（无停顿）。
+    /// </summary>
+    void SetDigOutUnits(IReadOnlySet<UnitId> units);
 }

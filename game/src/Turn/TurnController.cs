@@ -68,6 +68,9 @@ public partial class TurnController : Node2D
     // 防止动画进行中重复提交导致状态错乱（同一时刻仅结算/播放一回合）。
     private bool _settling;
 
+    // 上一回合处于据守/布防姿态的单位：本回合若移动，动画起步前先"挖出"停顿（Req 8.5 扩展）。
+    private IReadOnlySet<UnitId> _prevDefenders = new HashSet<UnitId>();
+
     /// <summary>当前对局状态（唯一事实来源，Req 8.8）。结算前后由本控制器统一持有与推进。</summary>
     public GameState Current => _current;
 
@@ -204,6 +207,10 @@ public partial class TurnController : Node2D
         _settling = true;
         TurnSettled?.Invoke(after);
 
+        // Req 8.5 扩展：上回合据守/布防的单位本回合起步前"挖出"停顿；随后记录本回合据守/布防单位供下一回合。
+        _animator?.SetDigOutUnits(_prevDefenders);
+        _prevDefenders = CollectDefenders(mergedOrders);
+
         if (_animator is null)
         {
             // 未接线动画器：直接同步显示到结算后状态（Req 8.6）。
@@ -297,4 +304,19 @@ public partial class TurnController : Node2D
     }
 
     private static Side Opposite(Side side) => side == Side.Blue ? Side.Red : Side.Blue;
+
+    /// <summary>收集本回合处于据守/布防姿态的单位（供下一回合动画的"挖出"停顿判定）。</summary>
+    private static IReadOnlySet<UnitId> CollectDefenders(IReadOnlyList<UnitOrder> orders)
+    {
+        var defenders = new HashSet<UnitId>();
+        foreach (var order in orders)
+        {
+            if (order.Command is Command.Hold or Command.MoveHold)
+            {
+                defenders.Add(order.Unit);
+            }
+        }
+
+        return defenders;
+    }
 }
